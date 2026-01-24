@@ -29,7 +29,7 @@ local function rmdir(path)
 end
 
 -- Launch process and return info for later cleanup
-local function launch_process(cmd, path, port)
+local function launch_process(cmd, path, port, headless)
   if is_windows then
     local win_path = path:gsub("/", "\\")
 
@@ -44,7 +44,7 @@ local function launch_process(cmd, path, port)
       handle:close()
     end
 
-    -- Launch the process
+    -- Launch the process (headless mode minimizes window via love.load)
     os.execute('start "" "' .. cmd .. '" "' .. win_path .. '"')
 
     -- Brief wait for process to start
@@ -67,6 +67,7 @@ local function launch_process(cmd, path, port)
     return { port = port }  -- Fallback without PID
   else
     -- Unix: run in background with &
+    -- For true headless on Linux, use Xvfb: xvfb-run lua run_example_tests.lua --headless
     os.execute(cmd .. ' "' .. path .. '" 2>&1 &')
     return nil
   end
@@ -203,10 +204,47 @@ local function copy_game_files(game_path, wrapper_path)
   copy_dir(game_path, game_dst)
 end
 
+-- Create wrapper conf.lua content (loaded by LÖVE2D before main.lua)
+local function create_conf(options)
+  local headless_settings = ""
+  if options.headless then
+    -- For headless mode: minimize window and disable vsync for faster execution
+    -- True headless (t.modules.window = false) breaks the game loop on most platforms
+    headless_settings = [[
+  t.window.minwidth = 1
+  t.window.minheight = 1
+  t.window.vsync = 0
+]]
+  end
+
+  local conf = string.format([[
+-- Lovewright configuration
+function love.conf(t)
+  t.window = t.window or {}
+  t.window.width = %d
+  t.window.height = %d
+  t.window.title = "Lovewright Test"
+%s
+end
+]],
+    options.width,
+    options.height,
+    headless_settings
+  )
+  return conf
+end
+
 -- Create wrapper main.lua content
 local function create_wrapper(options, port)
   -- Create a wrapper that loads the runtime (runtime files will be copied alongside)
   -- Game files are copied to "game/" subdirectory
+  local headless_init = options.headless and [[
+  -- Headless mode: minimize window to reduce visual distraction
+  if love.window and love.window.minimize then
+    love.window.minimize()
+  end
+]] or ""
+
   local wrapper = string.format([[
 -- Lovewright runtime wrapper
 
@@ -216,20 +254,9 @@ lovewright = {
   runtime = require("lovewright.runtime")
 }
 
--- Override love.conf to inject runtime settings
-local original_conf = love.conf
-love.conf = function(t)
-  if original_conf then
-    original_conf(t)
-  end
-  t.window = t.window or {}
-  t.window.width = %d
-  t.window.height = %d
-  %s
-end
-
 -- Initialize runtime early
 function love.load(arg)
+%s
   -- Load the actual game FIRST (before runtime.init hooks love.update)
   local chunk, err = love.filesystem.load("game/main.lua")
   if chunk then
@@ -251,9 +278,7 @@ function love.load(arg)
 end
 _G._lovewright_load = love.load
 ]],
-    options.width,
-    options.height,
-    options.headless and "t.modules.window = false" or "",
+    headless_init,
     options.headless and "true" or "false",
     port
   )
@@ -297,6 +322,7 @@ function Game.launch(options)
 
   -- Create wrapper
   local wrapper = create_wrapper(options, self.port)
+  local conf = create_conf(options)
   local temp_dir = get_temp_dir()
   local wrapper_path = temp_dir .. "/wrapper_" .. os.time()
   mkdir(wrapper_path)
@@ -307,6 +333,16 @@ function Game.launch(options)
   -- Copy game files into wrapper directory
   copy_game_files(options.path, wrapper_path)
 
+  -- Write conf.lua (loaded by LÖVE2D before main.lua)
+  local conf_path = wrapper_path .. "/conf.lua"
+  if is_windows then
+    conf_path = conf_path:gsub("/", "\\")
+  end
+  local conf_file = io.open(conf_path, "w")
+  conf_file:write(conf)
+  conf_file:close()
+
+  -- Write main.lua
   local main_path = wrapper_path .. "/main.lua"
   if is_windows then
     main_path = main_path:gsub("/", "\\")
@@ -318,7 +354,7 @@ function Game.launch(options)
   self.wrapper_path = wrapper_path
 
   -- Launch process
-  self.process_info = launch_process(options.love_path, wrapper_path, self.port)
+  self.process_info = launch_process(options.love_path, wrapper_path, self.port, options.headless)
 
   -- Connect to runtime
   local socket = require("socket")

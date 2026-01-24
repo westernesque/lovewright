@@ -88,7 +88,15 @@ The `examples/` directory contains a simple game and test suite to demonstrate l
 ```bash
 # From the lovewright root directory
 lua examples/run_example_tests.lua
+
+# Run in headless mode (minimized window, faster execution)
+lua examples/run_example_tests.lua --headless
+
+# For true headless on Linux CI, use Xvfb:
+xvfb-run lua examples/run_example_tests.lua --headless
 ```
+
+**Note:** LÖVE2D requires a display context, so `--headless` minimizes the window rather than hiding it completely. For CI environments without a display, use Xvfb on Linux or a virtual display on Windows.
 
 This will:
 1. Launch the simple-game example with LÖVE2D

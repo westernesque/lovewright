@@ -8,6 +8,11 @@
 local lovewright = {
   _VERSION = "0.1.0",
   _DESCRIPTION = "Automated test framework for LÖVE2D applications",
+
+  -- Global configuration (can be set before running tests)
+  config = {
+    headless = false,  -- Run games without a visible window
+  },
 }
 
 -- Load submodules
@@ -21,11 +26,16 @@ local Screenshot = require("lovewright.screenshot")
 -- @param options.path string Path to the game directory (required)
 -- @param options.width number Window width (default: 800)
 -- @param options.height number Window height (default: 600)
--- @param options.headless boolean Run without visible window (default: false)
+-- @param options.headless boolean Run without visible window (default: lovewright.config.headless)
 -- @param options.love_path string Path to love executable (default: "love")
 -- @param options.timeout number Connection timeout in ms (default: 5000)
 -- @return Game Game controller instance
 function lovewright.launch(options)
+  options = options or {}
+  -- Apply global config defaults
+  if options.headless == nil then
+    options.headless = lovewright.config.headless
+  end
   return Game.launch(options)
 end
 
