@@ -81,6 +81,29 @@ end)
 lua -e "require('lovewright').run({ path = 'tests' })"
 ```
 
+## Running the Examples
+
+The `examples/` directory contains a simple game and test suite to demonstrate lovewright's capabilities.
+
+```bash
+# From the lovewright root directory
+lua examples/run_example_tests.lua
+```
+
+This will:
+1. Launch the simple-game example with LÖVE2D
+2. Run 17 tests covering player movement, coin collection, game state, and screenshots
+3. Generate an HTML report at `lovewright-report.html`
+
+The example tests demonstrate:
+- Object locators (`game:locator("Player")`)
+- Property assertions (`expect(player):toHaveProperty("health", 100)`)
+- Input simulation (`game:keyboard():hold("right", 1.0)`)
+- Waiting for conditions (`game:waitFor(...)`)
+- Screenshot capture (`game:screenshot("test.png")`)
+- **Skipped tests** - Two tests using `it.skip()` to show skip functionality
+- **Intentional failures** - Three tests that purposely fail to show failure output
+
 ## API Reference
 
 ### Launching Games

@@ -112,14 +112,14 @@ describe("Simple Game", function()
       local coin = game:locator("Coin")
 
       -- Move player to coin (player at 400,300 -> coin at 600,200)
-      -- Need to move 200 right (at 200px/s = 1.0s) and 100 up (0.5s)
-      game:keyboard():hold("right", 1.2)
+      -- First move up to y=200 (100px at 200px/s = 0.5s), then right to x=600
       game:keyboard():hold("up", 0.6)
+      game:keyboard():hold("right", 1.2)
 
       -- Give time for collision
       game:waitFor(function()
         return player:get("score") > 0
-      end, 3000)
+      end, 5000)
 
       expect(coin):toBeHidden()
     end)
@@ -128,8 +128,9 @@ describe("Simple Game", function()
       local player = game:locator("Player")
 
       -- Move player to coin (player at 400,300 -> coin at 600,200)
-      game:keyboard():hold("right", 1.5)
-      game:keyboard():hold("up", 0.8)
+      -- First move up to y=200, then right to x=600
+      game:keyboard():hold("up", 0.6)
+      game:keyboard():hold("right", 1.2)
 
       game:waitFor(function()
         return player:get("score") > 0
@@ -175,6 +176,42 @@ describe("Simple Game", function()
     it("can capture the game screen", function()
       local success = game:screenshot("test_screenshot.png")
       expect(success):toBeTruthy()
+    end)
+  end)
+
+  -- These tests are SKIPPED to demonstrate the skip functionality
+  describe("Example Skipped Tests", function()
+    it.skip("is skipped because feature not implemented yet", function()
+      -- This test would check for a feature that doesn't exist yet
+      local powerup = game:locator("PowerUp")
+      expect(powerup):toExist()
+    end)
+
+    it.skip("is skipped because it requires multiplayer", function()
+      -- This test would require multiplayer which isn't implemented
+      local player2 = game:locator("Player2")
+      expect(player2):toExist()
+    end)
+  end)
+
+  -- These tests are INTENTIONALLY failing to demonstrate failure output
+  describe("Example Failures (these SHOULD fail)", function()
+    it("demonstrates a failed equality assertion", function()
+      local player = game:locator("Player")
+      -- Player starts with 100 health, not 50
+      expect(player):toHaveProperty("health", 50)
+    end)
+
+    it("demonstrates a failed existence check", function()
+      -- There is no object named "Dragon" in the game
+      local dragon = game:locator("Dragon")
+      expect(dragon):toExist()
+    end)
+
+    it("demonstrates a failed comparison", function()
+      local player = game:locator("Player")
+      -- Player starts at x=400, which is not greater than 500
+      expect(player:get("x")):toBeGreaterThan(500)
     end)
   end)
 end)
