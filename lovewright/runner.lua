@@ -494,6 +494,10 @@ end
 
 -- Reset state (for testing the runner itself)
 function Runner.reset()
+  -- Reset port counter
+  local protocol = require("lovewright.protocol")
+  protocol.reset_ports()
+
   state.suites = {}
   state.current_suite = nil
   state.before_each = {}

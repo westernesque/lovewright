@@ -4,14 +4,17 @@
 local protocol = {}
 
 protocol.BASE_PORT = 39840  -- Higher port to avoid conflicts
+
+-- Port offset for this run (randomized to avoid TIME_WAIT conflicts)
+local port_offset = (os.time() % 100) * 10  -- 0-990 offset
 protocol.VERSION = "1.0.0"
 
--- Track used ports to avoid collisions
+-- Track used ports
 local used_ports = {}
 
 -- Get next available port
 function protocol.get_port()
-  local port = protocol.BASE_PORT
+  local port = protocol.BASE_PORT + port_offset
   while used_ports[port] do
     port = port + 1
   end
@@ -19,9 +22,14 @@ function protocol.get_port()
   return port
 end
 
--- Release a port (call after process is confirmed killed)
+-- Release a port after process is killed
 function protocol.release_port(port)
   used_ports[port] = nil
+end
+
+-- Reset port tracking (call between test runs if needed)
+function protocol.reset_ports()
+  used_ports = {}
 end
 
 -- Message types

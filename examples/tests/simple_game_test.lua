@@ -1,6 +1,9 @@
 --- Tests for the simple-game example
 -- Demonstrates lovewright test capabilities
 
+-- Add package path for running from project root
+package.path = "./?.lua;./?/init.lua;" .. package.path
+
 local lovewright = require("lovewright")
 local describe, it, expect = lovewright.describe, lovewright.it, lovewright.expect
 
@@ -108,9 +111,10 @@ describe("Simple Game", function()
       local player = game:locator("Player")
       local coin = game:locator("Coin")
 
-      -- Move player to coin
-      game:keyboard():hold("right", 0.5)
-      game:keyboard():hold("up", 0.3)
+      -- Move player to coin (player at 400,300 -> coin at 600,200)
+      -- Need to move 200 right (at 200px/s = 1.0s) and 100 up (0.5s)
+      game:keyboard():hold("right", 1.2)
+      game:keyboard():hold("up", 0.6)
 
       -- Give time for collision
       game:waitFor(function()
@@ -123,13 +127,13 @@ describe("Simple Game", function()
     it("increases score when collected", function()
       local player = game:locator("Player")
 
-      -- Move player to coin
-      game:keyboard():hold("right", 0.5)
-      game:keyboard():hold("up", 0.3)
+      -- Move player to coin (player at 400,300 -> coin at 600,200)
+      game:keyboard():hold("right", 1.5)
+      game:keyboard():hold("up", 0.8)
 
       game:waitFor(function()
         return player:get("score") > 0
-      end, 3000)
+      end, 5000)
 
       expect(player:get("score")):toBe(100)
     end)

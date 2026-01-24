@@ -28,14 +28,43 @@ local function rmdir(path)
   end
 end
 
--- Store PIDs for cleanup (Windows only tracks by window title)
+-- Launch process and return info for later cleanup
 local function launch_process(cmd, path, port)
   if is_windows then
-    -- Windows: use start with a unique title we can kill later
     local win_path = path:gsub("/", "\\")
-    local title = "lovewright_" .. port
-    os.execute('start "' .. title .. '" ' .. cmd .. ' "' .. win_path .. '"')
-    return title
+
+    -- Get list of love.exe PIDs before launch
+    local before_pids = {}
+    local handle = io.popen('wmic process where "name=\'love.exe\'" get processid 2>nul')
+    if handle then
+      for line in handle:lines() do
+        local pid = line:match("(%d+)")
+        if pid then before_pids[pid] = true end
+      end
+      handle:close()
+    end
+
+    -- Launch the process
+    os.execute('start "" "' .. cmd .. '" "' .. win_path .. '"')
+
+    -- Brief wait for process to start
+    local socket = require("socket")
+    socket.sleep(0.3)
+
+    -- Find the new love.exe PID
+    handle = io.popen('wmic process where "name=\'love.exe\'" get processid 2>nul')
+    if handle then
+      for line in handle:lines() do
+        local pid = line:match("(%d+)")
+        if pid and not before_pids[pid] then
+          handle:close()
+          return { pid = pid, port = port }
+        end
+      end
+      handle:close()
+    end
+
+    return { port = port }  -- Fallback without PID
   else
     -- Unix: run in background with &
     os.execute(cmd .. ' "' .. path .. '" 2>&1 &')
@@ -44,12 +73,19 @@ local function launch_process(cmd, path, port)
 end
 
 -- Kill a launched process
-local function kill_process(process_id)
-  if not process_id then return end
+local function kill_process(process_info)
+  if not process_info then return end
   if is_windows then
-    -- Kill by window title (suppress all output)
-    os.execute('taskkill /FI "WINDOWTITLE eq ' .. process_id .. '" /F >nul 2>&1')
-    os.execute('taskkill /FI "WINDOWTITLE eq ' .. process_id .. '*" /F >nul 2>&1')
+    if process_info.pid then
+      -- Kill by PID (most reliable)
+      local cmd = 'taskkill /PID ' .. process_info.pid .. ' /T /F >nul 2>&1'
+      os.execute(cmd)
+    end
+    -- Also kill by command line pattern as fallback
+    os.execute('wmic process where "commandline like \'%%lovewright%%\'" delete >nul 2>&1')
+  else
+    -- Unix: could use pkill or similar
+    os.execute('pkill -f "love.*lovewright" 2>/dev/null')
   end
 end
 
@@ -282,7 +318,7 @@ function Game.launch(options)
   self.wrapper_path = wrapper_path
 
   -- Launch process
-  self.process_id = launch_process(options.love_path, wrapper_path, self.port)
+  self.process_info = launch_process(options.love_path, wrapper_path, self.port)
 
   -- Connect to runtime
   local socket = require("socket")
@@ -497,7 +533,7 @@ function Game:close()
   -- Try graceful shutdown first
   if self.socket then
     pcall(function()
-      self:_request(protocol.MessageType.SHUTDOWN, {}, 1000)
+      self:_request(protocol.MessageType.SHUTDOWN, {}, 500)
     end)
     self.socket:close()
     self.socket = nil
@@ -505,28 +541,24 @@ function Game:close()
 
   self.connected = false
 
-  -- Give the process a moment to shutdown gracefully
-  local socket = require("socket")
-  socket.sleep(0.3)
-
-  -- Force kill the process if it's still running
-  if self.process_id then
-    kill_process(self.process_id)
-    self.process_id = nil
+  -- Force kill the process
+  if self.process_info then
+    kill_process(self.process_info)
+    self.process_info = nil
   end
 
-  -- Wait a bit for process to fully exit
+  -- Brief wait for cleanup
+  local socket = require("socket")
   socket.sleep(0.2)
 
-  -- Release port
-  if self.port then
-    protocol.release_port(self.port)
-    self.port = nil
-  end
+  -- Don't release port immediately - OS may still have it in TIME_WAIT
+  -- Ports will be reset between test runs by Runner.reset()
+  self.port = nil
 
-  -- Clean up wrapper
+  -- Clean up wrapper directory
   if self.wrapper_path then
     rmdir(self.wrapper_path)
+    self.wrapper_path = nil
   end
 end
 
