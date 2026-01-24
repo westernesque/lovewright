@@ -29,19 +29,25 @@ function lovewright.launch(options)
   return Game.launch(options)
 end
 
---- Define a test suite
--- @param name string Name of the suite
--- @param fn function Suite definition function
-function lovewright.describe(name, fn)
-  return Runner.describe(name, fn)
-end
+--- Define a test suite (callable table with .only and .skip modifiers)
+lovewright.describe = setmetatable({
+  only = Runner.describe_only,
+  skip = Runner.describe_skip,
+}, {
+  __call = function(_, name, fn)
+    return Runner.describe(name, fn)
+  end,
+})
 
---- Define a test case
--- @param name string Name of the test
--- @param fn function Test function
-function lovewright.it(name, fn)
-  return Runner.it(name, fn)
-end
+--- Define a test case (callable table with .only and .skip modifiers)
+lovewright.it = setmetatable({
+  only = Runner.it_only,
+  skip = Runner.it_skip,
+}, {
+  __call = function(_, name, fn)
+    return Runner.it(name, fn)
+  end,
+})
 
 --- Run before each test in the current suite
 -- @param fn function Hook function
@@ -89,18 +95,5 @@ end
 function lovewright.reset()
   return Runner.reset()
 end
-
--- Attach describe/it modifiers
-lovewright.describe.only = Runner.describe_only
-lovewright.describe.skip = Runner.describe_skip
-lovewright.it.only = Runner.it_only
-lovewright.it.skip = Runner.it_skip
-
--- Make describe and it callable with modifiers
-setmetatable(lovewright, {
-  __index = function(t, k)
-    return rawget(t, k)
-  end,
-})
 
 return lovewright

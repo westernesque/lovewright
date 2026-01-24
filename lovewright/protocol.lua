@@ -3,8 +3,26 @@
 
 local protocol = {}
 
-protocol.PORT = 19840
+protocol.BASE_PORT = 39840  -- Higher port to avoid conflicts
 protocol.VERSION = "1.0.0"
+
+-- Track used ports to avoid collisions
+local used_ports = {}
+
+-- Get next available port
+function protocol.get_port()
+  local port = protocol.BASE_PORT
+  while used_ports[port] do
+    port = port + 1
+  end
+  used_ports[port] = true
+  return port
+end
+
+-- Release a port (call after process is confirmed killed)
+function protocol.release_port(port)
+  used_ports[port] = nil
+end
 
 -- Message types
 protocol.MessageType = {
@@ -63,8 +81,8 @@ local function encode_value(v, depth)
       ["\r"] = "\\r",
       ["\t"] = "\\t",
     })
-    -- Escape control characters
-    escaped = escaped:gsub("[\x00-\x1f]", function(c)
+    -- Escape control characters (bytes 0-31)
+    escaped = escaped:gsub("%c", function(c)
       return string.format("\\u%04x", string.byte(c))
     end)
     return '"' .. escaped .. '"'

@@ -3,6 +3,19 @@
 
 local runtime = {}
 
+-- Debug logging (disabled by default, enable for troubleshooting)
+local DEBUG = false
+local debug_log_path = (os.getenv("TEMP") or os.getenv("TMPDIR") or "/tmp") .. "/lovewright_debug.log"
+
+local function debug_log(msg)
+  if not DEBUG then return end
+  local f = io.open(debug_log_path, "a")
+  if f then
+    f:write(os.date("%H:%M:%S") .. " " .. msg .. "\n")
+    f:close()
+  end
+end
+
 -- Load protocol (relative to lovewright install path)
 local protocol
 
@@ -24,6 +37,7 @@ local state = {
   pending_actions = {},  -- Timed actions (e.g., hold key for duration)
   frame_count = 0,
   headless = false,
+  port = nil,  -- Will be set from options
   screenshot_requested = false,
   screenshot_callback = nil,
 }
@@ -52,17 +66,20 @@ local original_input = {
 
 -- Initialize protocol module
 local function init_protocol()
-  -- Try to load from package path
+  -- Try to load from package path (works when bundled in wrapper)
   local ok, proto = pcall(require, "lovewright.protocol")
   if ok then
     protocol = proto
     return true
   end
 
-  -- Try relative path from runtime
+  -- Try relative path from runtime (handles both / and \ separators)
   ok, proto = pcall(function()
-    local path = debug.getinfo(1, "S").source:match("@(.+)/runtime/init%.lua$")
+    local source = debug.getinfo(1, "S").source
+    local path = source:match("@(.+)[/\\]runtime[/\\]init%.lua$")
     if path then
+      -- Normalize to forward slashes for package.path
+      path = path:gsub("\\", "/")
       package.path = path .. "/?.lua;" .. package.path
       return require("protocol")
     end
@@ -79,29 +96,48 @@ end
 -- Socket handling
 local socket
 
+local socket_error = nil
+
 local function init_socket()
   local ok, sock = pcall(require, "socket")
-  if ok then
+  if ok and sock then
     socket = sock
     return true
   end
+  socket_error = tostring(sock)
   return false
 end
 
 local function start_server()
-  if not socket then return false end
+  if not socket then
+    print("[lovewright] Socket not initialized: " .. tostring(socket_error))
+    return false
+  end
 
-  state.server = socket.tcp()
-  state.server:setoption("reuseaddr", true)
-  local ok, err = state.server:bind("127.0.0.1", protocol.PORT)
+  local ok, err = pcall(function()
+    state.server = socket.tcp()
+  end)
   if not ok then
-    print("[lovewright] Failed to bind server: " .. tostring(err))
+    print("[lovewright] Failed to create TCP socket: " .. tostring(err))
+    return false
+  end
+
+  ok, err = state.server:setoption("reuseaddr", true)
+  if not ok then
+    print("[lovewright] Failed to set socket option: " .. tostring(err))
+    -- Continue anyway, this isn't fatal
+  end
+
+  local port = state.port or protocol.BASE_PORT
+  ok, err = state.server:bind("127.0.0.1", port)
+  if not ok then
+    print("[lovewright] Failed to bind server on port " .. port .. ": " .. tostring(err))
     return false
   end
 
   state.server:listen(1)
   state.server:settimeout(0) -- Non-blocking
-  print("[lovewright] Server listening on port " .. protocol.PORT)
+  print("[lovewright] Server listening on port " .. port)
   return true
 end
 
@@ -115,14 +151,20 @@ local function accept_client()
     state.client = client
     state.connected = true
     state.buffer = ""
-    print("[lovewright] Client connected")
+    debug_log("[lovewright] Client connected!")
 
     -- Send ready event
+    debug_log("[lovewright] Sending ready event...")
     local msg = protocol.event(protocol.MessageType.READY, {
       version = protocol.VERSION,
       frame = state.frame_count,
     })
-    client:send(protocol.frame(msg))
+    local bytes, err = client:send(protocol.frame(msg))
+    if bytes then
+      debug_log("[lovewright] Ready event sent (" .. bytes .. " bytes)")
+    else
+      debug_log("[lovewright] ERROR sending ready event: " .. tostring(err))
+    end
   end
 end
 
@@ -345,13 +387,29 @@ local function patch_input()
 end
 
 -- Screenshot handling
+local pending_screenshot_data = nil
+
 local function take_screenshot()
-  if love.graphics then
+  if love.graphics and love.graphics.captureScreenshot then
+    -- LÖVE 11.0+ uses captureScreenshot with a callback
+    love.graphics.captureScreenshot(function(imageData)
+      local data = imageData:encode("png")
+      pending_screenshot_data = data:getString()
+    end)
+    return "pending"  -- Will be available next frame
+  elseif love.graphics and love.graphics.newScreenshot then
+    -- Older LÖVE versions
     local screenshot = love.graphics.newScreenshot()
     local data = screenshot:encode("png")
     return data:getString()
   end
   return nil
+end
+
+local function get_screenshot_data()
+  local data = pending_screenshot_data
+  pending_screenshot_data = nil
+  return data
 end
 
 -- Message handling
@@ -461,24 +519,47 @@ end
 function runtime.init(options)
   options = options or {}
   state.headless = options.headless or false
+  state.port = options.port  -- Use specific port if provided
 
+  -- Clear old log
+  local f = io.open(debug_log_path, "w")
+  if f then f:close() end
+
+  debug_log("[lovewright] Runtime init starting...")
+  debug_log("[lovewright] Port: " .. tostring(state.port))
+
+  debug_log("[lovewright] Loading protocol...")
   if not init_protocol() then
+    debug_log("[lovewright] ERROR: Failed to load protocol module")
     error("[lovewright] Failed to load protocol module")
   end
+  debug_log("[lovewright] Protocol loaded OK")
 
+  debug_log("[lovewright] Loading socket...")
   if not init_socket() then
-    error("[lovewright] Failed to load socket library")
+    debug_log("[lovewright] ERROR: Failed to load socket: " .. tostring(socket_error))
+    error("[lovewright] Failed to load socket library: " .. tostring(socket_error))
   end
+  debug_log("[lovewright] Socket loaded OK")
 
+  debug_log("[lovewright] Starting server...")
   if not start_server() then
-    error("[lovewright] Failed to start server")
+    debug_log("[lovewright] ERROR: Failed to start server")
+    error("[lovewright] Failed to start server (check if port " .. (state.port or protocol.BASE_PORT) .. " is in use)")
   end
+  debug_log("[lovewright] Server started OK")
 
   patch_input()
 
   -- Hook love.update
   original.update = love.update
+  local update_logged = false
   love.update = function(dt)
+    if not update_logged then
+      debug_log("[lovewright] First update tick!")
+      update_logged = true
+    end
+
     accept_client()
     process_messages()
     process_pending_actions(dt)
@@ -497,13 +578,17 @@ function runtime.init(options)
       original.draw()
     end
 
-    if state.screenshot_requested and state.screenshot_callback then
-      local data = take_screenshot()
-      if data then
-        state.screenshot_callback(data)
-      end
-      state.screenshot_requested = false
+    -- Check if we have pending screenshot data from previous frame
+    local screenshot_data = get_screenshot_data()
+    if screenshot_data and state.screenshot_callback then
+      state.screenshot_callback(screenshot_data)
       state.screenshot_callback = nil
+    end
+
+    -- Request new screenshot if needed
+    if state.screenshot_requested then
+      take_screenshot()
+      state.screenshot_requested = false
     end
   end
 

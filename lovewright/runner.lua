@@ -214,7 +214,7 @@ local function run_test(test, suite_name, hooks)
     return
   end
 
-  io.write("  ● " .. test.name .. " ")
+  io.write("  - " .. test.name .. " ")
   io.flush()
 
   local start_time = os.clock()
@@ -228,7 +228,8 @@ local function run_test(test, suite_name, hooks)
 
   if not ok then
     state.results.failed = state.results.failed + 1
-    io.write("✗ (beforeEach failed)\n")
+    io.write("FAIL (beforeEach failed)\n")
+    io.write("    Error: " .. tostring(err):gsub("\n", "\n    ") .. "\n")
     table.insert(state.results.failures, {
       suite = suite_name,
       test = test.name,
@@ -253,10 +254,10 @@ local function run_test(test, suite_name, hooks)
   if ok then
     if after_ok then
       state.results.passed = state.results.passed + 1
-      io.write(string.format("✓ (%.0fms)\n", duration * 1000))
+      io.write(string.format("PASS (%.0fms)\n", duration * 1000))
     else
       state.results.failed = state.results.failed + 1
-      io.write("✗ (afterEach failed)\n")
+      io.write("FAIL (afterEach failed)\n")
       table.insert(state.results.failures, {
         suite = suite_name,
         test = test.name,
@@ -266,7 +267,7 @@ local function run_test(test, suite_name, hooks)
     end
   else
     state.results.failed = state.results.failed + 1
-    io.write("✗\n")
+    io.write("FAIL\n")
     table.insert(state.results.failures, {
       suite = suite_name,
       test = test.name,
@@ -355,16 +356,33 @@ local function run_suite(suite, parent_name, parent_hooks)
   end)
 end
 
--- Discover test files
+-- Check if running on Windows
+local function is_windows()
+  return package.config:sub(1, 1) == "\\"
+end
+
+-- Discover test files (cross-platform)
 function Runner.discover(path, pattern)
   pattern = pattern or "_test%.lua$"
   local files = {}
 
-  -- Use find command to discover files
-  local handle = io.popen('find "' .. path .. '" -name "*.lua" -type f 2>/dev/null')
+  local cmd
+  if is_windows() then
+    -- Windows: use dir command
+    -- Convert forward slashes to backslashes for Windows
+    local win_path = path:gsub("/", "\\")
+    cmd = 'dir /s /b "' .. win_path .. '\\*.lua" 2>nul'
+  else
+    -- Unix: use find command
+    cmd = 'find "' .. path .. '" -name "*.lua" -type f 2>/dev/null'
+  end
+
+  local handle = io.popen(cmd)
   if handle then
     for file in handle:lines() do
-      if file:match(pattern) or file:match("_spec%.lua$") then
+      -- Normalize path separators
+      local normalized = file:gsub("\\", "/")
+      if normalized:match(pattern) or normalized:match("_spec%.lua$") then
         table.insert(files, file)
       end
     end
@@ -458,6 +476,16 @@ function Runner.run(options)
         print("   (in " .. failure.phase .. ")")
       end
       print("   " .. failure.error:gsub("\n", "\n   "))
+    end
+  end
+
+  -- Generate HTML report if requested
+  if options.report ~= false then
+    local Reporter = require("lovewright.reporter")
+    local report_path = options.report_output or "lovewright-report.html"
+    local ok, err = Reporter.generate_html(state.results, { output = report_path })
+    if ok then
+      print("\nHTML report: " .. report_path)
     end
   end
 

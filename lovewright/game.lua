@@ -6,6 +6,53 @@ local protocol = require("lovewright.protocol")
 local Game = {}
 Game.__index = Game
 
+-- Platform detection
+local is_windows = package.config:sub(1, 1) == "\\"
+
+-- Cross-platform utilities
+local function mkdir(path)
+  if is_windows then
+    local win_path = path:gsub("/", "\\")
+    os.execute('mkdir "' .. win_path .. '" 2>nul')
+  else
+    os.execute("mkdir -p " .. path .. " 2>/dev/null")
+  end
+end
+
+local function rmdir(path)
+  if is_windows then
+    local win_path = path:gsub("/", "\\")
+    os.execute('rmdir /s /q "' .. win_path .. '" 2>nul')
+  else
+    os.execute("rm -rf " .. path .. " 2>/dev/null")
+  end
+end
+
+-- Store PIDs for cleanup (Windows only tracks by window title)
+local function launch_process(cmd, path, port)
+  if is_windows then
+    -- Windows: use start with a unique title we can kill later
+    local win_path = path:gsub("/", "\\")
+    local title = "lovewright_" .. port
+    os.execute('start "' .. title .. '" ' .. cmd .. ' "' .. win_path .. '"')
+    return title
+  else
+    -- Unix: run in background with &
+    os.execute(cmd .. ' "' .. path .. '" 2>&1 &')
+    return nil
+  end
+end
+
+-- Kill a launched process
+local function kill_process(process_id)
+  if not process_id then return end
+  if is_windows then
+    -- Kill by window title (suppress all output)
+    os.execute('taskkill /FI "WINDOWTITLE eq ' .. process_id .. '" /F >nul 2>&1')
+    os.execute('taskkill /FI "WINDOWTITLE eq ' .. process_id .. '*" /F >nul 2>&1')
+  end
+end
+
 -- Default options
 local defaults = {
   width = 800,
@@ -15,23 +62,123 @@ local defaults = {
   timeout = 5000,  -- Connection timeout in ms
 }
 
--- Create wrapper files for runtime injection
-local function create_wrapper(game_path, options)
-  local lovewright_path = debug.getinfo(1, "S").source:match("@(.+)/game%.lua$")
-  if not lovewright_path then
-    lovewright_path = "."
+-- Get the directory containing lovewright
+local function get_lovewright_path()
+  local info = debug.getinfo(1, "S").source
+  -- Handle both @/path/to/game.lua and @C:\path\to\game.lua
+  local path = info:match("@(.+)[/\\]game%.lua$")
+  if path then
+    return path
+  end
+  -- Fallback: try to find relative to current working directory
+  return "lovewright"
+end
+
+-- Read a file's contents
+local function read_file(path)
+  local f = io.open(path, "rb")
+  if not f then return nil end
+  local content = f:read("*a")
+  f:close()
+  return content
+end
+
+-- Copy a single file
+local function copy_file(src, dst)
+  local src_path = is_windows and src:gsub("/", "\\") or src
+  local dst_path = is_windows and dst:gsub("/", "\\") or dst
+  local content = read_file(src_path)
+  if content then
+    local out = io.open(dst_path, "wb")
+    if out then
+      out:write(content)
+      out:close()
+      return true
+    end
+  end
+  return false
+end
+
+-- Recursively copy a directory
+local function copy_dir(src_dir, dst_dir)
+  mkdir(dst_dir)
+
+  -- List files in source directory
+  local cmd
+  if is_windows then
+    local win_src = src_dir:gsub("/", "\\")
+    cmd = 'dir /b "' .. win_src .. '" 2>nul'
+  else
+    cmd = 'ls -1 "' .. src_dir .. '" 2>/dev/null'
   end
 
-  -- Create a temporary wrapper that loads the runtime
+  local handle = io.popen(cmd)
+  if handle then
+    for name in handle:lines() do
+      local src_path = src_dir .. "/" .. name
+      local dst_path = dst_dir .. "/" .. name
+
+      -- Check if it's a directory
+      local check_cmd
+      if is_windows then
+        local win_path = src_path:gsub("/", "\\")
+        check_cmd = 'if exist "' .. win_path .. '\\*" (echo dir) else (echo file)'
+      else
+        check_cmd = 'test -d "' .. src_path .. '" && echo dir || echo file'
+      end
+
+      local type_handle = io.popen(check_cmd)
+      local file_type = type_handle:read("*l")
+      type_handle:close()
+
+      if file_type == "dir" then
+        copy_dir(src_path, dst_path)
+      else
+        copy_file(src_path, dst_path)
+      end
+    end
+    handle:close()
+  end
+end
+
+-- Copy runtime files to wrapper directory
+local function copy_runtime_files(wrapper_path)
+  local lw_path = get_lovewright_path()
+
+  -- Create lovewright subdirectory in wrapper
+  mkdir(wrapper_path .. "/lovewright")
+  mkdir(wrapper_path .. "/lovewright/runtime")
+
+  -- Files to copy
+  local files = {
+    { src = lw_path .. "/protocol.lua", dst = wrapper_path .. "/lovewright/protocol.lua" },
+    { src = lw_path .. "/runtime/init.lua", dst = wrapper_path .. "/lovewright/runtime/init.lua" },
+    { src = lw_path .. "/runtime/base64.lua", dst = wrapper_path .. "/lovewright/runtime/base64.lua" },
+  }
+
+  for _, file in ipairs(files) do
+    copy_file(file.src, file.dst)
+  end
+end
+
+-- Copy game files to wrapper directory
+local function copy_game_files(game_path, wrapper_path)
+  local game_dst = wrapper_path .. "/game"
+  copy_dir(game_path, game_dst)
+end
+
+-- Create wrapper main.lua content
+local function create_wrapper(options, port)
+  -- Create a wrapper that loads the runtime (runtime files will be copied alongside)
+  -- Game files are copied to "game/" subdirectory
   local wrapper = string.format([[
 -- Lovewright runtime wrapper
-package.path = %q .. "/?.lua;" .. %q .. "/runtime/?.lua;" .. package.path
 
--- Load and initialize runtime
-local runtime = require("lovewright.runtime")
-
--- Store original game path
-local game_path = %q
+-- Load and initialize runtime (bundled in wrapper)
+-- Expose as global so games can register objects
+lovewright = {
+  runtime = require("lovewright.runtime")
+}
 
 -- Override love.conf to inject runtime settings
 local original_conf = love.conf
@@ -47,27 +194,32 @@ end
 
 -- Initialize runtime early
 function love.load(arg)
-  runtime.init({ headless = %s })
-
-  -- Load the actual game
-  local chunk, err = love.filesystem.load(game_path .. "/main.lua")
+  -- Load the actual game FIRST (before runtime.init hooks love.update)
+  local chunk, err = love.filesystem.load("game/main.lua")
   if chunk then
-    chunk()
-    if love.load then
+    local ok, game_err = pcall(chunk)
+    if not ok then
+      error("Failed to execute game: " .. tostring(game_err))
+    end
+
+    -- Now init runtime AFTER game defines its callbacks (so we can wrap them)
+    lovewright.runtime.init({ headless = %s, port = %d })
+
+    -- Call game's love.load if it exists
+    if love.load and love.load ~= _G._lovewright_load then
       love.load(arg)
     end
   else
     error("Failed to load game: " .. tostring(err))
   end
 end
+_G._lovewright_load = love.load
 ]],
-    lovewright_path,
-    lovewright_path,
-    game_path,
     options.width,
     options.height,
     options.headless and "t.modules.window = false" or "",
-    options.headless and "true" or "false"
+    options.headless and "true" or "false",
+    port
   )
 
   return wrapper
@@ -77,7 +229,7 @@ end
 local function get_temp_dir()
   local tmpdir = os.getenv("TMPDIR") or os.getenv("TEMP") or os.getenv("TMP") or "/tmp"
   local lw_tmp = tmpdir .. "/lovewright"
-  os.execute("mkdir -p " .. lw_tmp .. " 2>/dev/null")
+  mkdir(lw_tmp)
   return lw_tmp
 end
 
@@ -104,27 +256,33 @@ function Game.launch(options)
   self.pending_requests = {}
   self.frame_count = 0
 
+  -- Get unique port for this instance
+  self.port = protocol.get_port()
+
   -- Create wrapper
-  local wrapper = create_wrapper(options.path, options)
+  local wrapper = create_wrapper(options, self.port)
   local temp_dir = get_temp_dir()
   local wrapper_path = temp_dir .. "/wrapper_" .. os.time()
-  os.execute("mkdir -p " .. wrapper_path)
+  mkdir(wrapper_path)
 
-  local wrapper_file = io.open(wrapper_path .. "/main.lua", "w")
+  -- Copy runtime files into wrapper directory
+  copy_runtime_files(wrapper_path)
+
+  -- Copy game files into wrapper directory
+  copy_game_files(options.path, wrapper_path)
+
+  local main_path = wrapper_path .. "/main.lua"
+  if is_windows then
+    main_path = main_path:gsub("/", "\\")
+  end
+  local wrapper_file = io.open(main_path, "w")
   wrapper_file:write(wrapper)
   wrapper_file:close()
 
   self.wrapper_path = wrapper_path
 
-  -- Build command
-  local cmd = string.format(
-    '%s "%s" 2>&1 &',
-    options.love_path,
-    wrapper_path
-  )
-
   -- Launch process
-  os.execute(cmd)
+  self.process_id = launch_process(options.love_path, wrapper_path, self.port)
 
   -- Connect to runtime
   local socket = require("socket")
@@ -134,7 +292,7 @@ function Game.launch(options)
   while socket.gettime() - start_time < timeout_sec do
     local client = socket.tcp()
     client:settimeout(0.1)
-    local ok, err = client:connect("127.0.0.1", protocol.PORT)
+    local ok, err = client:connect("127.0.0.1", self.port)
     if ok then
       self.socket = client
       self.socket:settimeout(0)
@@ -336,6 +494,7 @@ function Game:getObjects()
 end
 
 function Game:close()
+  -- Try graceful shutdown first
   if self.socket then
     pcall(function()
       self:_request(protocol.MessageType.SHUTDOWN, {}, 1000)
@@ -346,9 +505,28 @@ function Game:close()
 
   self.connected = false
 
+  -- Give the process a moment to shutdown gracefully
+  local socket = require("socket")
+  socket.sleep(0.3)
+
+  -- Force kill the process if it's still running
+  if self.process_id then
+    kill_process(self.process_id)
+    self.process_id = nil
+  end
+
+  -- Wait a bit for process to fully exit
+  socket.sleep(0.2)
+
+  -- Release port
+  if self.port then
+    protocol.release_port(self.port)
+    self.port = nil
+  end
+
   -- Clean up wrapper
   if self.wrapper_path then
-    os.execute("rm -rf " .. self.wrapper_path .. " 2>/dev/null")
+    rmdir(self.wrapper_path)
   end
 end
 

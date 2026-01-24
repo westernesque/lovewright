@@ -3,6 +3,18 @@
 
 local Screenshot = {}
 
+-- Platform detection
+local is_windows = package.config:sub(1, 1) == "\\"
+
+local function mkdir(path)
+  if is_windows then
+    local win_path = path:gsub("/", "\\")
+    os.execute('mkdir "' .. win_path .. '" 2>nul')
+  else
+    os.execute("mkdir -p " .. path .. " 2>/dev/null")
+  end
+end
+
 -- Capture a screenshot from the game
 function Screenshot.capture(game, filename)
   return game:screenshot(filename)
@@ -64,7 +76,7 @@ function Screenshot.snapshot(game, name, options)
   local update = options.update or false
 
   -- Ensure directory exists
-  os.execute("mkdir -p " .. snapshot_dir .. " 2>/dev/null")
+  mkdir(snapshot_dir)
 
   local snapshot_path = snapshot_dir .. "/" .. name .. ".png"
   local actual_path = snapshot_dir .. "/" .. name .. ".actual.png"
