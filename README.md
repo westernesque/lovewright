@@ -2,6 +2,8 @@
 
 An automated test framework for LÖVE2D applications, inspired by [Playwright](https://playwright.dev/).
 
+<img width="1657" height="1433" alt="Screenshot 2026-01-26 104338" src="https://github.com/user-attachments/assets/c7a3d98f-9502-4b9e-87c2-7ce81cbb6ca3" />
+
 ## Features
 
 - **Playwright-style API** - Familiar `describe`/`it` blocks with `expect` assertions
