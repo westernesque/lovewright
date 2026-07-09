@@ -185,10 +185,13 @@ local function copy_game_files(game_path, wrapper_path, exclude)
       .. ' /XD' .. names .. ' /XF' .. names
     os.execute(cmd .. " >nul 2>nul")
   else
-    os.execute('cp -R "' .. game_path .. '/." "' .. wrapper_path .. '/" 2>/dev/null')
+    -- tar pipe honors excludes during the copy (cp would copy .git first)
+    local tar_excludes = ""
     for _, name in ipairs(excludes) do
-      os.execute('rm -rf "' .. wrapper_path .. '/' .. name .. '" 2>/dev/null')
+      tar_excludes = tar_excludes .. " --exclude='" .. name .. "'"
     end
+    os.execute('tar cf - -C "' .. game_path .. '"' .. tar_excludes ..
+      ' . | tar xf - -C "' .. wrapper_path .. '" 2>/dev/null')
   end
 end
 
