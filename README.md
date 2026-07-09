@@ -124,7 +124,17 @@ local game = lovewright.launch({
   headless = false,          -- Run without window (default: false)
   love_path = "love",        -- Path to love executable
   timeout = 5000,            -- Connection timeout in ms
+  identity = "my-game-test", -- Optional: override save directory for test isolation
+  exclude = { "logs" },      -- Optional: dir/file names to skip when copying the game
 })
+```
+
+The game is copied into a temporary wrapper directory before launch, with its own
+`main.lua`/`conf.lua` set aside so lovewright can control startup. The game's conf
+settings (modules, etc.) are preserved; window size, title, and `identity` are
+overridden. `.git` is always excluded from the copy.
+
+```lua
 ```
 
 ### Locators
@@ -218,10 +228,31 @@ player:waitForDetached(5000)   -- Wait to not exist
 -- Capture screenshot
 game:screenshot("screenshot.png")
 
+-- Capture as a base64 PNG string (no file written)
+local b64 = game:screenshotBase64()
+
 -- Snapshot testing
 local screenshot = require("lovewright.screenshot")
 screenshot.assertSnapshot(game, "main-menu")  -- Compare to saved snapshot
 ```
+
+### Traces
+
+Traces record a per-test timeline — launches, input actions, waits, and
+assertions — with embedded screenshots, written as one self-contained HTML
+file per test. Failing tests include a screenshot taken at the moment of
+failure, and the HTML report links to each failure's trace.
+
+```lua
+lovewright.config.trace = "retain-on-failure"  -- "off" (default) | "on" | "retain-on-failure"
+lovewright.config.trace_dir = "lovewright-traces"  -- output directory
+```
+
+- `"off"` — no tracing
+- `"retain-on-failure"` — traces are recorded but only written for failing
+  tests (recommended; negligible overhead on passing tests)
+- `"on"` — a trace is written for every test, with a screenshot after every
+  input action (slower, but a full visual replay)
 
 ### Test Structure
 

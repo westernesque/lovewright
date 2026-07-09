@@ -206,6 +206,8 @@ end
 
 -- Run a single test
 local function run_test(test, suite_name, hooks)
+  local Trace = require("lovewright.trace")
+
   state.results.total = state.results.total + 1
 
   if test.skip or (state.only_mode and not test.only) then
@@ -219,6 +221,18 @@ local function run_test(test, suite_name, hooks)
 
   local start_time = os.clock()
 
+  Trace.begin(suite_name, test.name)
+
+  -- Record the trace path on a failure entry and print it
+  local function attach_trace(failure, status, err)
+    local trace_path = Trace.finish(status, err)
+    if failure and trace_path then
+      failure.trace = trace_path
+      io.write("    Trace: " .. trace_path .. "\n")
+    end
+    return trace_path
+  end
+
   -- Run beforeEach hooks
   local ok, err = pcall(function()
     for _, hook in ipairs(hooks.before_each) do
@@ -230,12 +244,14 @@ local function run_test(test, suite_name, hooks)
     state.results.failed = state.results.failed + 1
     io.write("FAIL (beforeEach failed)\n")
     io.write("    Error: " .. tostring(err):gsub("\n", "\n    ") .. "\n")
-    table.insert(state.results.failures, {
+    local failure = {
       suite = suite_name,
       test = test.name,
       error = tostring(err),
       phase = "beforeEach",
-    })
+    }
+    table.insert(state.results.failures, failure)
+    attach_trace(failure, "failed", err)
     return
   end
 
@@ -244,7 +260,22 @@ local function run_test(test, suite_name, hooks)
 
   local duration = os.clock() - start_time
 
-  -- Run afterEach hooks
+  if not ok then
+    state.results.failed = state.results.failed + 1
+    io.write("FAIL\n")
+    local failure = {
+      suite = suite_name,
+      test = test.name,
+      error = tostring(err),
+      phase = "test",
+    }
+    table.insert(state.results.failures, failure)
+    -- Finish the trace now: the failure screenshot must be captured before
+    -- afterEach hooks close the game
+    attach_trace(failure, "failed", err)
+  end
+
+  -- Run afterEach hooks (even if the test failed)
   local after_ok, after_err = pcall(function()
     for _, hook in ipairs(hooks.after_each) do
       hook()
@@ -255,31 +286,19 @@ local function run_test(test, suite_name, hooks)
     if after_ok then
       state.results.passed = state.results.passed + 1
       io.write(string.format("PASS (%.0fms)\n", duration * 1000))
+      attach_trace(nil, "passed")
     else
       state.results.failed = state.results.failed + 1
       io.write("FAIL (afterEach failed)\n")
-      table.insert(state.results.failures, {
+      local failure = {
         suite = suite_name,
         test = test.name,
         error = tostring(after_err),
         phase = "afterEach",
-      })
+      }
+      table.insert(state.results.failures, failure)
+      attach_trace(failure, "failed", after_err)
     end
-  else
-    state.results.failed = state.results.failed + 1
-    io.write("FAIL\n")
-    table.insert(state.results.failures, {
-      suite = suite_name,
-      test = test.name,
-      error = tostring(err),
-      phase = "test",
-    })
-    -- Still run afterEach even if test failed
-    pcall(function()
-      for _, hook in ipairs(hooks.after_each) do
-        hook()
-      end
-    end)
   end
 end
 
@@ -330,15 +349,32 @@ local function run_suite(suite, parent_name, parent_hooks)
     table.insert(hooks.after_each, h)
   end
 
-  -- Run beforeAll
+  -- Run beforeAll (traced so setup/launch failures are diagnosable)
+  local Trace = require("lovewright.trace")
+  Trace.begin(full_name, "(suite setup)")
   local ok, err = pcall(function()
     run_hooks(suite.before_all)
   end)
 
   if not ok then
     io.write("  beforeAll failed: " .. tostring(err) .. "\n")
+    -- Count as a failure so runners exit non-zero
+    state.results.failed = state.results.failed + 1
+    local failure = {
+      suite = full_name,
+      test = "(suite setup)",
+      error = tostring(err),
+      phase = "beforeAll",
+    }
+    table.insert(state.results.failures, failure)
+    local trace_path = Trace.finish("failed", err)
+    if trace_path then
+      failure.trace = trace_path
+      io.write("    Trace: " .. trace_path .. "\n")
+    end
     return
   end
+  Trace.finish("passed")
 
   -- Run tests
   for _, test in ipairs(suite.tests) do

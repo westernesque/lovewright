@@ -2,6 +2,7 @@
 -- Provides keyboard, mouse, and gamepad input simulation
 
 local protocol = require("lovewright.protocol")
+local Trace = require("lovewright.trace")
 
 local Input = {}
 
@@ -22,6 +23,7 @@ function Keyboard:press(key, scancode)
     key = key,
     scancode = scancode,
   })
+  Trace.action(self.game, "keyboard:press", { key = key })
   return self
 end
 
@@ -32,6 +34,7 @@ function Keyboard:release(key, scancode)
     key = key,
     scancode = scancode,
   })
+  Trace.record("action", "keyboard:release", { key = key })
   return self
 end
 
@@ -49,6 +52,7 @@ function Keyboard:hold(key, duration, scancode)
   local socket = require("socket")
   socket.sleep(duration + 0.05)
 
+  Trace.action(self.game, "keyboard:hold", { key = key, duration = duration })
   return self
 end
 
@@ -98,6 +102,8 @@ function Mouse:move(x, y)
     x = x,
     y = y,
   })
+  -- record only (no snapshot): drags generate many moves
+  Trace.record("action", "mouse:move", { x = x, y = y })
   return self
 end
 
@@ -118,6 +124,7 @@ function Mouse:click(x, y, button)
   local socket = require("socket")
   socket.sleep(0.1)
 
+  Trace.action(self.game, "mouse:click", { x = x, y = y, button = button })
   return self
 end
 
@@ -154,6 +161,12 @@ function Mouse:drag(from_x, from_y, to_x, to_y, button, duration)
   button = button or 1
   duration = duration or 0.2
   local socket = require("socket")
+
+  Trace.record("action", "mouse:drag", {
+    from = from_x .. "," .. from_y,
+    to = to_x .. "," .. to_y,
+    button = button,
+  })
 
   -- Move to start, press, move to end, release
   self:move(from_x, from_y)

@@ -11,7 +11,9 @@ local lovewright = {
 
   -- Global configuration (can be set before running tests)
   config = {
-    headless = false,  -- Run games without a visible window
+    headless = false,           -- Run games without a visible window
+    trace = "off",              -- "off" | "on" | "retain-on-failure"
+    trace_dir = "lovewright-traces",  -- Where trace HTML files are written
   },
 }
 
@@ -20,6 +22,10 @@ local Game = require("lovewright.game")
 local Runner = require("lovewright.runner")
 local ExpectModule = require("lovewright.expect")
 local Screenshot = require("lovewright.screenshot")
+local Trace = require("lovewright.trace")
+
+-- Traces read the shared config table (mode and output dir)
+Trace.config = lovewright.config
 
 --- Launch a LÖVE2D game for testing
 -- @param options table Configuration options
@@ -29,6 +35,8 @@ local Screenshot = require("lovewright.screenshot")
 -- @param options.headless boolean Run without visible window (default: lovewright.config.headless)
 -- @param options.love_path string Path to love executable (default: "love")
 -- @param options.timeout number Connection timeout in ms (default: 5000)
+-- @param options.identity string Override save-directory identity for test isolation
+-- @param options.exclude table Dir/file names to skip when copying the game (".git" always skipped)
 -- @return Game Game controller instance
 function lovewright.launch(options)
   options = options or {}

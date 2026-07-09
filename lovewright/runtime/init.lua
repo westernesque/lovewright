@@ -108,6 +108,26 @@ local function init_socket()
   return false
 end
 
+-- Send all bytes over the non-blocking client socket.
+-- client:send() may send only part of a large payload (e.g. screenshots);
+-- returning early would corrupt the length-prefixed message stream.
+local function send_all(client, data)
+  local first = 1
+  local total = #data
+  while first <= total do
+    local last, err, partial = client:send(data, first)
+    if last then
+      first = last + 1
+    elseif err == "timeout" then
+      first = (partial or (first - 1)) + 1
+      socket.sleep(0.001)  -- let the OS drain the send buffer
+    else
+      return false, err
+    end
+  end
+  return true
+end
+
 local function start_server()
   if not socket then
     print("[lovewright] Socket not initialized: " .. tostring(socket_error))
@@ -159,9 +179,9 @@ local function accept_client()
       version = protocol.VERSION,
       frame = state.frame_count,
     })
-    local bytes, err = client:send(protocol.frame(msg))
-    if bytes then
-      debug_log("[lovewright] Ready event sent (" .. bytes .. " bytes)")
+    local ok, err = send_all(client, protocol.frame(msg))
+    if ok then
+      debug_log("[lovewright] Ready event sent")
     else
       debug_log("[lovewright] ERROR sending ready event: " .. tostring(err))
     end
@@ -170,7 +190,7 @@ end
 
 local function send_response(response)
   if state.client then
-    state.client:send(protocol.frame(response))
+    send_all(state.client, protocol.frame(response))
   end
 end
 
@@ -447,9 +467,15 @@ local function handle_message(msg)
   elseif msg_type == protocol.MessageType.TAKE_SCREENSHOT then
     state.screenshot_requested = true
     state.screenshot_callback = function(data)
-      -- Encode as base64
-      local b64 = require("lovewright.runtime.base64")
-      local encoded = b64.encode(data)
+      -- Encode as base64; prefer LÖVE's native encoder (the pure-Lua fallback
+      -- can stall the game loop for a megabyte-sized PNG)
+      local encoded
+      if love.data and love.data.encode then
+        encoded = love.data.encode("string", "base64", data, 0)
+      else
+        local b64 = require("lovewright.runtime.base64")
+        encoded = b64.encode(data)
+      end
       send_response(protocol.response(id, { screenshot = encoded }))
     end
     return nil -- Response sent later

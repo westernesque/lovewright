@@ -17,7 +17,7 @@ end
 
 -- Resolve the locator to an object ID
 function Locator:_resolve()
-  local now = os.time()
+  local now = require("socket").gettime()
 
   -- Cache for 100ms
   if self._cached_id and now - self._cached_time < 0.1 then
@@ -85,7 +85,7 @@ function Locator:all()
     for _, obj in ipairs(result) do
       local loc = Locator.new(self.game, { id = obj.id })
       loc._cached_id = obj.id
-      loc._cached_time = os.time()
+      loc._cached_time = require("socket").gettime()
       table.insert(locators, loc)
     end
   end
@@ -221,6 +221,7 @@ function Locator:click()
   local cx = box.x + box.width / 2
   local cy = box.y + box.height / 2
 
+  require("lovewright.trace").record("action", "locator:click " .. tostring(self.query))
   self.game:mouse():click(cx, cy)
   return self
 end

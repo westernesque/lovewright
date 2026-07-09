@@ -1,5 +1,6 @@
 # lovewright project files
 *lovewright-report.html
+lovewright-traces/
 
 # Compiled Lua sources
 luac.out

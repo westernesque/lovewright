@@ -43,6 +43,12 @@ function ValueExpect:_assert(condition, message, expected, actual)
     message = "NOT " .. message
   end
 
+  require("lovewright.trace").record(
+    condition and "assert:pass" or "assert:fail",
+    message,
+    { expected = tostring(expected), actual = tostring(actual) }
+  )
+
   if not condition then
     error(AssertionError.new(message, expected, actual))
   end
@@ -309,6 +315,12 @@ function LocatorExpect:_assert(condition, message, expected, actual)
     message = "NOT " .. message
   end
 
+  require("lovewright.trace").record(
+    condition and "assert:pass" or "assert:fail",
+    message .. " (" .. tostring(self.locator.query) .. ")",
+    { expected = tostring(expected), actual = tostring(actual) }
+  )
+
   if not condition then
     error(AssertionError.new(message, expected, actual))
   end
@@ -415,6 +427,12 @@ function GameExpect:_assert(condition, message, expected, actual)
     condition = not condition
     message = "NOT " .. message
   end
+
+  require("lovewright.trace").record(
+    condition and "assert:pass" or "assert:fail",
+    message,
+    { expected = tostring(expected), actual = tostring(actual) }
+  )
 
   if not condition then
     error(AssertionError.new(message, expected, actual))

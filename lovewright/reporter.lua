@@ -132,6 +132,9 @@ function Reporter.generate_html(results, options)
       white-space: pre-wrap;
       word-break: break-word;
     }
+    .failure .trace-link { margin-top: 10px; }
+    .failure .trace-link a { color: #667eea; text-decoration: none; }
+    .failure .trace-link a:hover { text-decoration: underline; }
     .failure .phase {
       display: inline-block;
       background: #e74c3c;
@@ -203,6 +206,9 @@ function Reporter.generate_html(results, options)
   html = html .. '    <div class="section">\n'
   html = html .. '      <h2>Test Results</h2>\n'
 
+  -- Directory of the report, for making trace links relative to it
+  local report_dir = output_path:match("^(.*[/\\])") or ""
+
   if #failures > 0 then
     for i, failure in ipairs(failures) do
       local phase_badge = ""
@@ -210,17 +216,32 @@ function Reporter.generate_html(results, options)
         phase_badge = string.format('<span class="phase">%s</span>', escape_html(failure.phase))
       end
 
+      local trace_link = ""
+      if failure.trace then
+        local href = failure.trace
+        -- If the trace lives under the report's directory, link relatively
+        if report_dir ~= "" and href:sub(1, #report_dir) == report_dir then
+          href = href:sub(#report_dir + 1)
+        end
+        trace_link = string.format(
+          '<div class="trace-link"><a href="%s">📋 View trace</a></div>',
+          escape_html(href)
+        )
+      end
+
       html = html .. string.format([[
       <div class="failure">
         <div class="test-name">%s%s</div>
         <div class="suite-name">%s</div>
         <div class="error">%s</div>
+        %s
       </div>
 ]],
         escape_html(failure.test),
         phase_badge,
         escape_html(failure.suite),
-        escape_html(failure.error)
+        escape_html(failure.error),
+        trace_link
       )
     end
   else

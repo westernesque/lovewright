@@ -6,6 +6,8 @@
 --
 -- Options:
 --   --headless    Run tests without visible game windows (for CI)
+--   --trace       Record a full trace (with screenshots) for every test;
+--                 failing tests always get a trace
 --   --path=PATH   Test directory path (default: examples/tests)
 
 -- Add lovewright to path
@@ -16,10 +18,13 @@ local lovewright = require("lovewright")
 -- Parse command line arguments
 local path = "examples/tests"
 local headless = false
+local trace = "retain-on-failure"
 
 for i = 1, #arg do
   if arg[i] == "--headless" then
     headless = true
+  elseif arg[i] == "--trace" then
+    trace = "on"
   elseif arg[i]:match("^--path=") then
     path = arg[i]:match("^--path=(.+)$")
   elseif not arg[i]:match("^%-") then
@@ -29,6 +34,7 @@ end
 
 -- Configure lovewright
 lovewright.config.headless = headless
+lovewright.config.trace = trace
 
 print("Lovewright Test Runner")
 print("======================")

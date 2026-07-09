@@ -2,6 +2,7 @@
 -- Launches LÖVE2D games with runtime injection and provides control API
 
 local protocol = require("lovewright.protocol")
+local Trace = require("lovewright.trace")
 
 local Game = {}
 Game.__index = Game
@@ -28,21 +29,28 @@ local function rmdir(path)
   end
 end
 
+-- List running love.exe PIDs (Windows). Uses tasklist because wmic is
+-- removed on current Windows 11 builds.
+local function get_love_pids()
+  local pids = {}
+  local handle = io.popen('tasklist /FI "IMAGENAME eq love.exe" /FO CSV /NH 2>nul')
+  if handle then
+    for line in handle:lines() do
+      local pid = line:match('^"[^"]*","(%d+)"')
+      if pid then pids[pid] = true end
+    end
+    handle:close()
+  end
+  return pids
+end
+
 -- Launch process and return info for later cleanup
 local function launch_process(cmd, path, port, headless)
   if is_windows then
     local win_path = path:gsub("/", "\\")
 
     -- Get list of love.exe PIDs before launch
-    local before_pids = {}
-    local handle = io.popen('wmic process where "name=\'love.exe\'" get processid 2>nul')
-    if handle then
-      for line in handle:lines() do
-        local pid = line:match("(%d+)")
-        if pid then before_pids[pid] = true end
-      end
-      handle:close()
-    end
+    local before_pids = get_love_pids()
 
     -- Launch the process (headless mode minimizes window via love.load)
     os.execute('start "" "' .. cmd .. '" "' .. win_path .. '"')
@@ -52,16 +60,10 @@ local function launch_process(cmd, path, port, headless)
     socket.sleep(0.3)
 
     -- Find the new love.exe PID
-    handle = io.popen('wmic process where "name=\'love.exe\'" get processid 2>nul')
-    if handle then
-      for line in handle:lines() do
-        local pid = line:match("(%d+)")
-        if pid and not before_pids[pid] then
-          handle:close()
-          return { pid = pid, port = port }
-        end
+    for pid in pairs(get_love_pids()) do
+      if not before_pids[pid] then
+        return { pid = pid, port = port }
       end
-      handle:close()
     end
 
     return { port = port }  -- Fallback without PID
@@ -82,8 +84,6 @@ local function kill_process(process_info)
       local cmd = 'taskkill /PID ' .. process_info.pid .. ' /T /F >nul 2>&1'
       os.execute(cmd)
     end
-    -- Also kill by command line pattern as fallback
-    os.execute('wmic process where "commandline like \'%%lovewright%%\'" delete >nul 2>&1')
   else
     -- Unix: could use pkill or similar
     os.execute('pkill -f "love.*lovewright" 2>/dev/null')
@@ -136,46 +136,12 @@ local function copy_file(src, dst)
   return false
 end
 
--- Recursively copy a directory
-local function copy_dir(src_dir, dst_dir)
-  mkdir(dst_dir)
-
-  -- List files in source directory
-  local cmd
-  if is_windows then
-    local win_src = src_dir:gsub("/", "\\")
-    cmd = 'dir /b "' .. win_src .. '" 2>nul'
-  else
-    cmd = 'ls -1 "' .. src_dir .. '" 2>/dev/null'
-  end
-
-  local handle = io.popen(cmd)
-  if handle then
-    for name in handle:lines() do
-      local src_path = src_dir .. "/" .. name
-      local dst_path = dst_dir .. "/" .. name
-
-      -- Check if it's a directory
-      local check_cmd
-      if is_windows then
-        local win_path = src_path:gsub("/", "\\")
-        check_cmd = 'if exist "' .. win_path .. '\\*" (echo dir) else (echo file)'
-      else
-        check_cmd = 'test -d "' .. src_path .. '" && echo dir || echo file'
-      end
-
-      local type_handle = io.popen(check_cmd)
-      local file_type = type_handle:read("*l")
-      type_handle:close()
-
-      if file_type == "dir" then
-        copy_dir(src_path, dst_path)
-      else
-        copy_file(src_path, dst_path)
-      end
-    end
-    handle:close()
-  end
+-- Move (rename) a file, overwriting the destination; returns false if src missing
+local function move_file(src, dst)
+  local src_path = is_windows and src:gsub("/", "\\") or src
+  local dst_path = is_windows and dst:gsub("/", "\\") or dst
+  os.remove(dst_path)
+  return os.rename(src_path, dst_path) and true or false
 end
 
 -- Copy runtime files to wrapper directory
@@ -198,13 +164,37 @@ local function copy_runtime_files(wrapper_path)
   end
 end
 
--- Copy game files to wrapper directory
-local function copy_game_files(game_path, wrapper_path)
-  local game_dst = wrapper_path .. "/game"
-  copy_dir(game_path, game_dst)
+-- Copy game files into the wrapper root using native tools (fast for large games).
+-- Copying to the root keeps the game's require() and asset paths working unchanged.
+-- `exclude` is a list of directory/file names to skip (matched at any depth).
+local function copy_game_files(game_path, wrapper_path, exclude)
+  -- Always skip version control data
+  local excludes = { ".git" }
+  for _, name in ipairs(exclude or {}) do
+    table.insert(excludes, name)
+  end
+
+  if is_windows then
+    local win_src = game_path:gsub("/", "\\")
+    local win_dst = wrapper_path:gsub("/", "\\")
+    local names = ""
+    for _, name in ipairs(excludes) do
+      names = names .. ' "' .. name .. '"'
+    end
+    local cmd = 'robocopy "' .. win_src .. '" "' .. win_dst .. '" /E /NFL /NDL /NJH /NJS /NP'
+      .. ' /XD' .. names .. ' /XF' .. names
+    os.execute(cmd .. " >nul 2>nul")
+  else
+    os.execute('cp -R "' .. game_path .. '/." "' .. wrapper_path .. '/" 2>/dev/null')
+    for _, name in ipairs(excludes) do
+      os.execute('rm -rf "' .. wrapper_path .. '/' .. name .. '" 2>/dev/null')
+    end
+  end
 end
 
--- Create wrapper conf.lua content (loaded by LÖVE2D before main.lua)
+-- Create wrapper conf.lua content (loaded by LÖVE2D before main.lua).
+-- Chains the game's own conf.lua (renamed to _lovewright_game_conf.lua) so module
+-- flags and other settings are preserved, then applies lovewright overrides.
 local function create_conf(options)
   local headless_settings = ""
   if options.headless then
@@ -217,18 +207,31 @@ local function create_conf(options)
 ]]
   end
 
+  local identity_setting = ""
+  if options.identity then
+    -- Isolated save directory so tests don't touch (or depend on) real save data
+    identity_setting = string.format("  t.identity = %q\n", options.identity)
+  end
+
   local conf = string.format([[
 -- Lovewright configuration
+-- Load the game's own conf (if it had one) so module/other settings are preserved
+pcall(require, "_lovewright_game_conf")
+local game_conf = love.conf
+
 function love.conf(t)
+  if game_conf then pcall(game_conf, t) end
   t.window = t.window or {}
   t.window.width = %d
   t.window.height = %d
   t.window.title = "Lovewright Test"
-%s
+  t.console = false
+%s%s
 end
 ]],
     options.width,
     options.height,
+    identity_setting,
     headless_settings
   )
   return conf
@@ -237,7 +240,8 @@ end
 -- Create wrapper main.lua content
 local function create_wrapper(options, port)
   -- Create a wrapper that loads the runtime (runtime files will be copied alongside)
-  -- Game files are copied to "game/" subdirectory
+  -- Game files live in the wrapper root; the game's main.lua is renamed to
+  -- _lovewright_game_main.lua so this wrapper can control startup
   local headless_init = options.headless and [[
   -- Headless mode: minimize window to reduce visual distraction
   if love.window and love.window.minimize then
@@ -258,7 +262,7 @@ lovewright = {
 function love.load(arg)
 %s
   -- Load the actual game FIRST (before runtime.init hooks love.update)
-  local chunk, err = love.filesystem.load("game/main.lua")
+  local chunk, err = love.filesystem.load("_lovewright_game_main.lua")
   if chunk then
     local ok, game_err = pcall(chunk)
     if not ok then
@@ -327,11 +331,15 @@ function Game.launch(options)
   local wrapper_path = temp_dir .. "/wrapper_" .. os.time()
   mkdir(wrapper_path)
 
-  -- Copy runtime files into wrapper directory
-  copy_runtime_files(wrapper_path)
+  -- Copy game files into the wrapper root (keeps require/asset paths intact)
+  copy_game_files(options.path, wrapper_path, options.exclude)
 
-  -- Copy game files into wrapper directory
-  copy_game_files(options.path, wrapper_path)
+  -- Set aside the game's own entry points so the wrapper can control startup
+  move_file(wrapper_path .. "/main.lua", wrapper_path .. "/_lovewright_game_main.lua")
+  move_file(wrapper_path .. "/conf.lua", wrapper_path .. "/_lovewright_game_conf.lua")
+
+  -- Copy runtime files into wrapper directory (after game copy so ours win)
+  copy_runtime_files(wrapper_path)
 
   -- Write conf.lua (loaded by LÖVE2D before main.lua)
   local conf_path = wrapper_path .. "/conf.lua"
@@ -371,12 +379,13 @@ function Game.launch(options)
       self.connected = true
       break
     end
+    client:close()
     socket.sleep(0.1)
   end
 
   if not self.connected then
     self:close()
-    error("Failed to connect to game runtime (timeout)")
+    error("Failed to connect to game runtime on port " .. tostring(self.port) .. " (timeout)")
   end
 
   -- Wait for ready event
@@ -385,6 +394,13 @@ function Game.launch(options)
     self:close()
     error("Game runtime did not send ready event")
   end
+
+  Trace.game_launched(self)
+  Trace.record("game", "launch " .. tostring(options.path), {
+    width = options.width,
+    height = options.height,
+    port = self.port,
+  })
 
   return self
 end
@@ -511,12 +527,21 @@ function Game:mouse()
   return Input.mouse(self)
 end
 
-function Game:screenshot(filename)
+-- Capture the current frame; returns the PNG as a base64 string
+function Game:screenshotBase64()
   local result = self:_request(protocol.MessageType.TAKE_SCREENSHOT, {}, 10000)
-  if result and result.screenshot then
+  return result and result.screenshot or nil
+end
+
+function Game:screenshot(filename)
+  local b64 = self:screenshotBase64()
+  if b64 then
+    -- Embed the same capture in the active trace without a second request
+    Trace.attach(b64, "screenshot: " .. tostring(filename))
+
     -- Decode base64 and save
     local base64 = require("lovewright.runtime.base64")
-    local data = base64.decode(result.screenshot)
+    local data = base64.decode(b64)
     local file = io.open(filename, "wb")
     if file then
       file:write(data)
@@ -535,12 +560,14 @@ function Game:waitFor(condition, timeout)
 
   while socket.gettime() - start_time < timeout_sec do
     if condition() then
+      Trace.record("wait", string.format("waitFor condition met in %.2fs", socket.gettime() - start_time))
       return true
     end
     self:_process_messages()
     socket.sleep(0.016)  -- ~60fps
   end
 
+  Trace.record("wait", string.format("waitFor TIMEOUT after %.2fs", timeout_sec))
   error("waitFor timeout")
 end
 
@@ -553,11 +580,13 @@ function Game:waitForObject(name, timeout)
   while socket.gettime() - start_time < timeout_sec do
     local result = self:_request(protocol.MessageType.QUERY_OBJECT, { name = name })
     if result and #result > 0 then
+      Trace.record("wait", string.format("waitForObject %s found in %.2fs", name, socket.gettime() - start_time))
       return self:locator(name)
     end
     socket.sleep(0.016)
   end
 
+  Trace.record("wait", string.format("waitForObject %s TIMEOUT after %.2fs", name, timeout_sec))
   error("waitForObject timeout: " .. name)
 end
 
@@ -566,6 +595,9 @@ function Game:getObjects()
 end
 
 function Game:close()
+  Trace.record("game", "close")
+  Trace.game_closed(self)
+
   -- Try graceful shutdown first
   if self.socket then
     pcall(function()
