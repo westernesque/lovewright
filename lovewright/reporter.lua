@@ -132,10 +132,46 @@ function Reporter.generate_html(results, options)
       white-space: pre-wrap;
       word-break: break-word;
     }
+    .suite-header {
+      font-size: 1.1em;
+      font-weight: bold;
+      color: #667eea;
+      margin: 20px 0 8px 0;
+    }
+    .test-row {
+      background: #16213e;
+      border-left: 4px solid #0f3460;
+      border-radius: 0 8px 8px 0;
+      padding: 10px 15px;
+      margin-bottom: 8px;
+    }
+    .test-row.passed { border-left-color: #2ecc71; }
+    .test-row.failed { border-left-color: #e74c3c; }
+    .test-row.skipped { border-left-color: #f39c12; opacity: 0.7; }
+    .test-row .row-line { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+    .test-row .mark { font-weight: bold; }
+    .test-row.passed .mark { color: #2ecc71; }
+    .test-row.failed .mark { color: #e74c3c; }
+    .test-row.skipped .mark { color: #f39c12; }
+    .test-row .name { font-weight: 600; }
+    .test-row .duration { opacity: 0.6; font-size: 0.85em; }
+    .test-row a { color: #667eea; text-decoration: none; font-size: 0.9em; }
+    .test-row a:hover { text-decoration: underline; }
+    .test-row .error {
+      background: #0d1b2a;
+      padding: 12px;
+      border-radius: 6px;
+      margin-top: 8px;
+      font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+      font-size: 0.85em;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
     .failure .trace-link { margin-top: 10px; }
     .failure .trace-link a { color: #667eea; text-decoration: none; }
     .failure .trace-link a:hover { text-decoration: underline; }
-    .failure .phase {
+    .failure .phase, .test-row .phase {
       display: inline-block;
       background: #e74c3c;
       color: white;
@@ -202,31 +238,69 @@ function Reporter.generate_html(results, options)
     pass_rate
   )
 
-  -- Failures section
+  -- Test results section
   html = html .. '    <div class="section">\n'
   html = html .. '      <h2>Test Results</h2>\n'
 
   -- Directory of the report, for making trace links relative to it
   local report_dir = output_path:match("^(.*[/\\])") or ""
 
-  if #failures > 0 then
+  local function trace_link(trace)
+    if not trace then return "" end
+    local href = trace
+    -- If the trace lives under the report's directory, link relatively
+    if report_dir ~= "" and href:sub(1, #report_dir) == report_dir then
+      href = href:sub(#report_dir + 1)
+    end
+    return string.format('<a href="%s">📋 trace</a>', escape_html(href))
+  end
+
+  local tests = results.tests or {}
+
+  if #tests > 0 then
+    -- Full run listing: every test with status, duration, and trace link
+    local marks = { passed = "✓", failed = "✗", skipped = "–" }
+    local current_suite = nil
+
+    for _, t in ipairs(tests) do
+      if t.suite ~= current_suite then
+        current_suite = t.suite
+        html = html .. '      <div class="suite-header">' .. escape_html(t.suite) .. "</div>\n"
+      end
+
+      local status = t.status or "passed"
+      local duration = t.duration
+        and string.format('<span class="duration">%s</span>', format_duration(t.duration))
+        or ""
+      local phase_badge = ""
+      if status == "failed" and t.phase and t.phase ~= "test" then
+        phase_badge = string.format('<span class="phase">%s</span>', escape_html(t.phase))
+      end
+      local error_block = t.error
+        and string.format('<div class="error">%s</div>', escape_html(t.error))
+        or ""
+
+      html = html .. string.format([[
+      <div class="test-row %s">
+        <div class="row-line"><span class="mark">%s</span><span class="name">%s</span>%s%s%s</div>
+        %s
+      </div>
+]],
+        status,
+        marks[status] or "?",
+        escape_html(t.test),
+        phase_badge,
+        duration,
+        trace_link(t.trace),
+        error_block
+      )
+    end
+  elseif #failures > 0 then
+    -- Fallback for callers that only provide failures
     for i, failure in ipairs(failures) do
       local phase_badge = ""
       if failure.phase and failure.phase ~= "test" then
         phase_badge = string.format('<span class="phase">%s</span>', escape_html(failure.phase))
-      end
-
-      local trace_link = ""
-      if failure.trace then
-        local href = failure.trace
-        -- If the trace lives under the report's directory, link relatively
-        if report_dir ~= "" and href:sub(1, #report_dir) == report_dir then
-          href = href:sub(#report_dir + 1)
-        end
-        trace_link = string.format(
-          '<div class="trace-link"><a href="%s">📋 View trace</a></div>',
-          escape_html(href)
-        )
       end
 
       html = html .. string.format([[
@@ -241,7 +315,7 @@ function Reporter.generate_html(results, options)
         phase_badge,
         escape_html(failure.suite),
         escape_html(failure.error),
-        trace_link
+        failure.trace and ('<div class="trace-link">' .. trace_link(failure.trace) .. "</div>") or ""
       )
     end
   else
@@ -255,7 +329,7 @@ function Reporter.generate_html(results, options)
   </div>
 
   <footer>
-    Generated by <a href="https://github.com/lovewright/lovewright">Lovewright</a> -
+    Generated by <a href="https://github.com/westernesque/lovewright">Lovewright</a> -
     Automated testing for LÖVE2D
   </footer>
 </body>

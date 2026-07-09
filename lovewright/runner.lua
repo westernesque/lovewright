@@ -18,6 +18,7 @@ local state = {
     skipped = 0,
     total = 0,
     failures = {},
+    tests = {},           -- Every test in run order: {suite, test, status, duration, error?, phase?, trace?}
     duration = 0,
   },
 }
@@ -210,8 +211,13 @@ local function run_test(test, suite_name, hooks)
 
   state.results.total = state.results.total + 1
 
+  -- Full per-test record (passed tests included), used by the HTML report
+  local record = { suite = suite_name, test = test.name }
+  table.insert(state.results.tests, record)
+
   if test.skip or (state.only_mode and not test.only) then
     state.results.skipped = state.results.skipped + 1
+    record.status = "skipped"
     io.write("  - " .. test.name .. " (skipped)\n")
     return
   end
@@ -223,14 +229,31 @@ local function run_test(test, suite_name, hooks)
 
   Trace.begin(suite_name, test.name)
 
-  -- Record the trace path on a failure entry and print it
-  local function attach_trace(failure, status, err)
+  -- Finish the trace, remember its path, and print it for failures
+  local function finish_trace(failure, status, err)
     local trace_path = Trace.finish(status, err)
-    if failure and trace_path then
-      failure.trace = trace_path
-      io.write("    Trace: " .. trace_path .. "\n")
+    if trace_path then
+      record.trace = trace_path
+      if failure then
+        failure.trace = trace_path
+        io.write("    Trace: " .. trace_path .. "\n")
+      end
     end
-    return trace_path
+  end
+
+  local function record_failure(err, phase)
+    state.results.failed = state.results.failed + 1
+    record.status = "failed"
+    record.error = tostring(err)
+    record.phase = phase
+    local failure = {
+      suite = suite_name,
+      test = test.name,
+      error = tostring(err),
+      phase = phase,
+    }
+    table.insert(state.results.failures, failure)
+    return failure
   end
 
   -- Run beforeEach hooks
@@ -241,17 +264,10 @@ local function run_test(test, suite_name, hooks)
   end)
 
   if not ok then
-    state.results.failed = state.results.failed + 1
     io.write("FAIL (beforeEach failed)\n")
     io.write("    Error: " .. tostring(err):gsub("\n", "\n    ") .. "\n")
-    local failure = {
-      suite = suite_name,
-      test = test.name,
-      error = tostring(err),
-      phase = "beforeEach",
-    }
-    table.insert(state.results.failures, failure)
-    attach_trace(failure, "failed", err)
+    local failure = record_failure(err, "beforeEach")
+    finish_trace(failure, "failed", err)
     return
   end
 
@@ -259,20 +275,14 @@ local function run_test(test, suite_name, hooks)
   ok, err = pcall(test.fn)
 
   local duration = os.clock() - start_time
+  record.duration = duration
 
   if not ok then
-    state.results.failed = state.results.failed + 1
     io.write("FAIL\n")
-    local failure = {
-      suite = suite_name,
-      test = test.name,
-      error = tostring(err),
-      phase = "test",
-    }
-    table.insert(state.results.failures, failure)
+    local failure = record_failure(err, "test")
     -- Finish the trace now: the failure screenshot must be captured before
     -- afterEach hooks close the game
-    attach_trace(failure, "failed", err)
+    finish_trace(failure, "failed", err)
   end
 
   -- Run afterEach hooks (even if the test failed)
@@ -285,19 +295,13 @@ local function run_test(test, suite_name, hooks)
   if ok then
     if after_ok then
       state.results.passed = state.results.passed + 1
+      record.status = "passed"
       io.write(string.format("PASS (%.0fms)\n", duration * 1000))
-      attach_trace(nil, "passed")
+      finish_trace(nil, "passed")
     else
-      state.results.failed = state.results.failed + 1
       io.write("FAIL (afterEach failed)\n")
-      local failure = {
-        suite = suite_name,
-        test = test.name,
-        error = tostring(after_err),
-        phase = "afterEach",
-      }
-      table.insert(state.results.failures, failure)
-      attach_trace(failure, "failed", after_err)
+      local failure = record_failure(after_err, "afterEach")
+      finish_trace(failure, "failed", after_err)
     end
   end
 end
@@ -367,9 +371,18 @@ local function run_suite(suite, parent_name, parent_hooks)
       phase = "beforeAll",
     }
     table.insert(state.results.failures, failure)
+    local record = {
+      suite = full_name,
+      test = "(suite setup)",
+      status = "failed",
+      error = tostring(err),
+      phase = "beforeAll",
+    }
+    table.insert(state.results.tests, record)
     local trace_path = Trace.finish("failed", err)
     if trace_path then
       failure.trace = trace_path
+      record.trace = trace_path
       io.write("    Trace: " .. trace_path .. "\n")
     end
     return
@@ -444,6 +457,7 @@ function Runner.run(options)
     skipped = 0,
     total = 0,
     failures = {},
+    tests = {},
     duration = 0,
   }
 
@@ -547,6 +561,7 @@ function Runner.reset()
     skipped = 0,
     total = 0,
     failures = {},
+    tests = {},
     duration = 0,
   }
 end
