@@ -388,11 +388,13 @@ function Game.launch(options)
     error("Failed to connect to game runtime on port " .. tostring(self.port) .. " (timeout)")
   end
 
-  -- Wait for ready event
-  local ready = self:_wait_for_event(protocol.MessageType.READY, 5000)
+  -- Wait for ready event. Uses the full connection timeout: the first visible
+  -- frame can stall the game loop for several seconds on some GPUs (e.g.
+  -- Vulkan pipeline compilation), delaying the runtime's first update tick.
+  local ready = self:_wait_for_event(protocol.MessageType.READY, options.timeout)
   if not ready then
     self:close()
-    error("Game runtime did not send ready event")
+    error("Game runtime did not send ready event within " .. options.timeout .. "ms")
   end
 
   Trace.game_launched(self)
