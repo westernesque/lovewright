@@ -347,4 +347,74 @@ function Reporter.generate_html(results, options)
   return nil, "Failed to write report"
 end
 
+-- Escape a value for a GitHub Actions annotation property (title)
+local function escape_annotation_property(str)
+  return tostring(str):gsub("%%", "%%25"):gsub("\r", "%%0D"):gsub("\n", "%%0A")
+    :gsub(":", "%%3A"):gsub(",", "%%2C")
+end
+
+-- Escape a value for a GitHub Actions annotation message
+local function escape_annotation_message(str)
+  return tostring(str):gsub("%%", "%%25"):gsub("\r", "%%0D"):gsub("\n", "%%0A")
+end
+
+--- GitHub Actions integration: append a markdown table of all tests to the
+-- job summary (GITHUB_STEP_SUMMARY) and emit ::error annotations for failures
+function Reporter.github_actions(results)
+  local tests = results.tests or {}
+
+  -- Job summary (rendered on the workflow run page)
+  local summary_path = os.getenv("GITHUB_STEP_SUMMARY")
+  if summary_path then
+    local f = io.open(summary_path, "a")
+    if f then
+      f:write(string.format(
+        "## Lovewright Test Results\n\n**%d passed, %d failed, %d skipped** (%.2fs)\n\n",
+        results.passed or 0, results.failed or 0, results.skipped or 0, results.duration or 0
+      ))
+
+      if #tests > 0 then
+        f:write("| | Suite | Test | Duration |\n|---|---|---|---|\n")
+        for _, t in ipairs(tests) do
+          local mark = t.status == "passed" and "✅"
+            or t.status == "failed" and "❌"
+            or "⏭️"
+          local duration = t.duration and string.format("%.0fms", t.duration * 1000) or ""
+          f:write(string.format("| %s | %s | %s | %s |\n",
+            mark, t.suite:gsub("|", "\\|"), t.test:gsub("|", "\\|"), duration))
+        end
+      end
+
+      -- Failure details, collapsible
+      for _, t in ipairs(tests) do
+        if t.status == "failed" then
+          f:write(string.format(
+            "\n<details><summary>❌ %s &gt; %s%s</summary>\n\n```\n%s\n```\n</details>\n",
+            t.suite, t.test,
+            (t.phase and t.phase ~= "test") and (" (" .. t.phase .. ")") or "",
+            t.error or "unknown error"
+          ))
+        end
+      end
+
+      if (results.failed or 0) > 0 then
+        f:write("\nDownload the run artifact for the HTML report, traces, and failure screenshots.\n")
+      end
+
+      f:close()
+    end
+  end
+
+  -- Error annotations (shown at the top of the run and on pull requests)
+  if os.getenv("GITHUB_ACTIONS") then
+    for _, t in ipairs(tests) do
+      if t.status == "failed" then
+        print(string.format("::error title=%s::%s",
+          escape_annotation_property(t.suite .. " > " .. t.test),
+          escape_annotation_message(t.error or "test failed")))
+      end
+    end
+  end
+end
+
 return Reporter

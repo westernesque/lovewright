@@ -539,6 +539,12 @@ function Runner.run(options)
     end
   end
 
+  -- On GitHub Actions, also write a job summary and failure annotations
+  if os.getenv("GITHUB_ACTIONS") or os.getenv("GITHUB_STEP_SUMMARY") then
+    local Reporter = require("lovewright.reporter")
+    pcall(Reporter.github_actions, state.results)
+  end
+
   return state.results
 end
 
