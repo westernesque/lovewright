@@ -45,7 +45,20 @@ local function get_love_pids()
 end
 
 -- Launch process and return info for later cleanup
-local function launch_process(cmd, path, port, headless)
+-- Extra command-line arguments for the game, quoted for the shell. The game
+-- reads them from LÖVE's global `arg` (Nano MD uses --scene=<name> to boot
+-- straight into a scene for the visual-parity capture).
+local function format_args(game_args)
+  if not game_args or #game_args == 0 then return "" end
+  local out = {}
+  for _, a in ipairs(game_args) do
+    table.insert(out, '"' .. tostring(a):gsub('"', '\\"') .. '"')
+  end
+  return " " .. table.concat(out, " ")
+end
+
+local function launch_process(cmd, path, port, headless, game_args)
+  local extra = format_args(game_args)
   if is_windows then
     local win_path = path:gsub("/", "\\")
 
@@ -53,7 +66,7 @@ local function launch_process(cmd, path, port, headless)
     local before_pids = get_love_pids()
 
     -- Launch the process (headless mode minimizes window via love.load)
-    os.execute('start "" "' .. cmd .. '" "' .. win_path .. '"')
+    os.execute('start "" "' .. cmd .. '" "' .. win_path .. '"' .. extra)
 
     -- Brief wait for process to start
     local socket = require("socket")
@@ -70,7 +83,7 @@ local function launch_process(cmd, path, port, headless)
   else
     -- Unix: run in background with &
     -- For true headless on Linux, use Xvfb: xvfb-run lua run_example_tests.lua --headless
-    os.execute(cmd .. ' "' .. path .. '" 2>&1 &')
+    os.execute(cmd .. ' "' .. path .. '"' .. extra .. ' 2>&1 &')
     return nil
   end
 end
@@ -365,7 +378,7 @@ function Game.launch(options)
   self.wrapper_path = wrapper_path
 
   -- Launch process
-  self.process_info = launch_process(options.love_path, wrapper_path, self.port, options.headless)
+  self.process_info = launch_process(options.love_path, wrapper_path, self.port, options.headless, options.args)
 
   -- Connect to runtime
   local socket = require("socket")
@@ -547,14 +560,28 @@ function Game:screenshot(filename)
     -- Decode base64 and save
     local base64 = require("lovewright.runtime.base64")
     local data = base64.decode(b64)
-    local file = io.open(filename, "wb")
+
+    -- Create the parent directory first: io.open("wb") fails silently when it
+    -- does not exist, which used to surface as a bare "screenshot returned
+    -- false" with nothing to go on.
+    local dir = filename:match("^(.*)[/\][^/\]+$")
+    if dir and dir ~= "" then
+      if is_windows then
+        os.execute('mkdir "' .. dir:gsub("/", "\\") .. '" 2>nul')
+      else
+        os.execute('mkdir -p "' .. dir .. '" 2>/dev/null')
+      end
+    end
+
+    local file, err = io.open(filename, "wb")
     if file then
       file:write(data)
       file:close()
       return true
     end
+    return false, "cannot write " .. tostring(filename) .. ": " .. tostring(err)
   end
-  return false
+  return false, "no screenshot data from the game"
 end
 
 function Game:waitFor(condition, timeout)

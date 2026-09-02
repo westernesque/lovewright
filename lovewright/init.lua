@@ -37,6 +37,7 @@ Trace.config = lovewright.config
 -- @param options.timeout number Connection timeout in ms (default: 5000)
 -- @param options.identity string Override save-directory identity for test isolation
 -- @param options.exclude table Dir/file names to skip when copying the game (".git" always skipped)
+-- @param options.args table Extra command-line arguments for the game (read from LÖVE's `arg`)
 -- @return Game Game controller instance
 function lovewright.launch(options)
   options = options or {}

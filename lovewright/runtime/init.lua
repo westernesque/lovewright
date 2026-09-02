@@ -4,7 +4,7 @@
 local runtime = {}
 
 -- Debug logging (disabled by default, enable for troubleshooting)
-local DEBUG = false
+local DEBUG = os.getenv("LOVEWRIGHT_DEBUG") == "1"
 local debug_log_path = (os.getenv("TEMP") or os.getenv("TMPDIR") or "/tmp") .. "/lovewright_debug.log"
 
 local function debug_log(msg)
@@ -190,7 +190,9 @@ end
 
 local function send_response(response)
   if state.client then
-    send_all(state.client, protocol.frame(response))
+    local framed = protocol.frame(response)
+    local ok, err = send_all(state.client, framed)
+    debug_log("[lovewright] send_response: bytes=" .. #framed .. " ok=" .. tostring(ok) .. " err=" .. tostring(err))
   end
 end
 
@@ -410,11 +412,16 @@ end
 local pending_screenshot_data = nil
 
 local function take_screenshot()
+  debug_log("[lovewright] take_screenshot: capture=" .. tostring(love.graphics and love.graphics.captureScreenshot ~= nil))
   if love.graphics and love.graphics.captureScreenshot then
     -- LÖVE 11.0+ uses captureScreenshot with a callback
     love.graphics.captureScreenshot(function(imageData)
-      local data = imageData:encode("png")
-      pending_screenshot_data = data:getString()
+      local ok, err = pcall(function()
+        local data = imageData:encode("png")
+        pending_screenshot_data = data:getString()
+      end)
+      debug_log("[lovewright] captureScreenshot cb: ok=" .. tostring(ok) .. " err=" .. tostring(err)
+        .. " bytes=" .. tostring(pending_screenshot_data and #pending_screenshot_data or 0))
     end)
     return "pending"  -- Will be available next frame
   elseif love.graphics and love.graphics.newScreenshot then
@@ -487,6 +494,46 @@ local function handle_message(msg)
   else
     return protocol.error_response(id, "Unknown message type: " .. tostring(msg_type))
   end
+end
+
+-- Screenshot draw hook. Kept in a function so love.update can re-install it:
+-- the game's own love.load runs after this runtime initialises and commonly
+-- replaces love.draw (gamestate.registerEvents, FPS overlays), which would
+-- otherwise orphan the hook and leave every screenshot request unanswered.
+local our_draw = nil
+
+local function install_draw_hook()
+  -- Capture the previous love.draw in a LOCAL, never in the shared `original`
+  -- table: a game that wraps love.draw (calling what it found, i.e. our hook)
+  -- and a re-hook that then overwrites original.draw with that wrapper close a
+  -- cycle - the wrapper calls our old hook, which calls the wrapper - and the
+  -- game hangs on its first frame.
+  local prev = love.draw
+  original.draw = prev
+  our_draw = function()
+    if prev then
+      prev()
+    end
+
+    -- Check if we have pending screenshot data from previous frame
+    local screenshot_data = get_screenshot_data()
+    if screenshot_data and state.screenshot_callback then
+      state.screenshot_callback(screenshot_data)
+      state.screenshot_callback = nil
+    end
+
+    -- Request new screenshot if needed
+    if state.screenshot_requested then
+      debug_log("[lovewright] draw hook: screenshot requested")
+      take_screenshot()
+      state.screenshot_requested = false
+    end
+  end
+  love.draw = our_draw
+end
+
+local function ensure_draw_hook()
+  if love.draw ~= our_draw then install_draw_hook() end
 end
 
 local function process_messages()
@@ -586,6 +633,13 @@ function runtime.init(options)
       update_logged = true
     end
 
+    -- Re-hook love.draw if the game replaced it after we installed ours.
+    -- Games routinely do: gamestate.registerEvents() assigns love.draw, and
+    -- wrappers (FPS overlays and the like) reassign it again inside
+    -- love.load - which runs AFTER this runtime initialises. Without this the
+    -- draw hook is orphaned and every screenshot request goes unanswered.
+    ensure_draw_hook()
+
     accept_client()
     process_messages()
     process_pending_actions(dt)
@@ -597,27 +651,9 @@ function runtime.init(options)
     state.frame_count = state.frame_count + 1
   end
 
-  -- Hook love.draw for screenshots
-  original.draw = love.draw
-  love.draw = function()
-    if original.draw then
-      original.draw()
-    end
-
-    -- Check if we have pending screenshot data from previous frame
-    local screenshot_data = get_screenshot_data()
-    if screenshot_data and state.screenshot_callback then
-      state.screenshot_callback(screenshot_data)
-      state.screenshot_callback = nil
-    end
-
-    -- Request new screenshot if needed
-    if state.screenshot_requested then
-      take_screenshot()
-      state.screenshot_requested = false
-    end
-  end
-
+  -- Hook love.draw for screenshots (re-applied from love.update whenever the
+  -- game swaps love.draw out from under us - see ensure_draw_hook)
+  install_draw_hook()
   -- Hook love.quit
   original.quit = love.quit
   love.quit = function()
