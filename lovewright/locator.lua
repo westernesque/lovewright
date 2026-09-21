@@ -15,8 +15,12 @@ function Locator.new(game, query)
   return self
 end
 
--- Resolve the locator to an object ID
-function Locator:_resolve()
+-- Resolve the locator to an object ID. `timeout` (ms) bounds the object
+-- query like Locator:get's does the property read: a game held in one
+-- long frame (a loading screen building a level) answers neither
+-- quickly, and a caller that raised the read timeout expects the lookup
+-- to wait just as patiently.
+function Locator:_resolve(timeout)
   local now = require("socket").gettime()
 
   -- Cache for 100ms
@@ -32,7 +36,7 @@ function Locator:_resolve()
     query_params = self.query
   end
 
-  local result = self.game:_request(protocol.MessageType.QUERY_OBJECT, query_params)
+  local result = self.game:_request(protocol.MessageType.QUERY_OBJECT, query_params, timeout)
 
   if result and #result > 0 then
     self._cached_id = result[1].id
@@ -43,9 +47,13 @@ function Locator:_resolve()
   return nil
 end
 
--- Get a property from the object
-function Locator:get(property)
-  local object_id = self:_resolve()
+-- Get a property from the object. `timeout` (ms, default 5000) is how long
+-- to wait for the game's answer - for the object lookup and the property
+-- read alike: raise it for a property whose getter does real work on
+-- first read (an in-game self-test computing its results) or while the
+-- game may be stuck in one long frame (a loading screen).
+function Locator:get(property, timeout)
+  local object_id = self:_resolve(timeout)
   if not object_id then
     error("Object not found: " .. tostring(self.query))
   end
@@ -53,7 +61,7 @@ function Locator:get(property)
   local result = self.game:_request(protocol.MessageType.GET_PROPERTY, {
     object_id = object_id,
     property = property,
-  })
+  }, timeout)
 
   return result and result.value
 end
