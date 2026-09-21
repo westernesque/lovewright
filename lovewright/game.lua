@@ -65,8 +65,14 @@ local function launch_process(cmd, path, port, headless, game_args)
     -- Get list of love.exe PIDs before launch
     local before_pids = get_love_pids()
 
-    -- Launch the process (headless mode minimizes window via love.load)
-    os.execute('start "" "' .. cmd .. '" "' .. win_path .. '"' .. extra)
+    -- Headless: the runtime hides the window (runtime/headless.lua); these
+    -- SDL hints (SDL3 / SDL2 spelling) stop it taking keyboard focus in the
+    -- instant between creation and hiding
+    local env = ""
+    if headless then
+      env = 'set "SDL_WINDOW_ACTIVATE_WHEN_SHOWN=0"&& set "SDL_WINDOW_NO_ACTIVATION_WHEN_SHOWN=1"&& '
+    end
+    os.execute(env .. 'start "" "' .. cmd .. '" "' .. win_path .. '"' .. extra)
 
     -- Brief wait for process to start
     local socket = require("socket")
@@ -81,9 +87,12 @@ local function launch_process(cmd, path, port, headless, game_args)
 
     return { port = port }  -- Fallback without PID
   else
-    -- Unix: run in background with &
-    -- For true headless on Linux, use Xvfb: xvfb-run lua run_example_tests.lua --headless
-    os.execute(cmd .. ' "' .. path .. '"' .. extra .. ' 2>&1 &')
+    -- Unix: run in background with &. Headless hides the window the same way
+    -- (runtime/headless.lua); a machine with NO display at all still needs a
+    -- virtual one: xvfb-run lua run_example_tests.lua --headless
+    local env = headless
+      and 'SDL_WINDOW_ACTIVATE_WHEN_SHOWN=0 SDL_WINDOW_NO_ACTIVATION_WHEN_SHOWN=1 ' or ''
+    os.execute(env .. cmd .. ' "' .. path .. '"' .. extra .. ' 2>&1 &')
     return nil
   end
 end
@@ -108,6 +117,7 @@ local defaults = {
   width = 800,
   height = 600,
   headless = false,
+  headless_mode = "hidden",  -- "hidden" | "offscreen" | "minimized" (see runtime/headless.lua)
   love_path = "love",
   timeout = 5000,  -- Connection timeout in ms
 }
@@ -170,6 +180,7 @@ local function copy_runtime_files(wrapper_path)
     { src = lw_path .. "/protocol.lua", dst = wrapper_path .. "/lovewright/protocol.lua" },
     { src = lw_path .. "/runtime/init.lua", dst = wrapper_path .. "/lovewright/runtime/init.lua" },
     { src = lw_path .. "/runtime/base64.lua", dst = wrapper_path .. "/lovewright/runtime/base64.lua" },
+    { src = lw_path .. "/runtime/headless.lua", dst = wrapper_path .. "/lovewright/runtime/headless.lua" },
   }
 
   for _, file in ipairs(files) do
@@ -214,13 +225,22 @@ end
 local function create_conf(options)
   local headless_settings = ""
   if options.headless then
-    -- For headless mode: minimize window and disable vsync for faster execution
-    -- True headless (t.modules.window = false) breaks the game loop on most platforms
+    -- Headless: no vsync (nothing is presented to a screen anyone watches).
+    -- LÖVE cannot render with the window module off, so the window exists
+    -- and the runtime hides it (runtime/headless.lua); creating it far
+    -- off-screen means it never flashes before that happens.
     headless_settings = [[
   t.window.minwidth = 1
   t.window.minheight = 1
   t.window.vsync = 0
 ]]
+    if options.headless_mode ~= "minimized" then
+      headless_settings = headless_settings .. [[
+  t.window.x = -32000
+  t.window.y = -32000
+  t.window.fullscreen = false
+]]
+    end
   end
 
   local identity_setting = ""
@@ -258,12 +278,11 @@ local function create_wrapper(options, port)
   -- Create a wrapper that loads the runtime (runtime files will be copied alongside)
   -- Game files live in the wrapper root; the game's main.lua is renamed to
   -- _lovewright_game_main.lua so this wrapper can control startup
-  local headless_init = options.headless and [[
-  -- Headless mode: minimize window to reduce visual distraction
-  if love.window and love.window.minimize then
-    love.window.minimize()
-  end
-]] or ""
+  local headless_init = options.headless and string.format([[
+  -- Headless mode: hide the window before the game touches it (and keep it
+  -- hidden if the game re-creates it) - see lovewright/runtime/headless.lua
+  require("lovewright.runtime.headless").install(%q)
+]], options.headless_mode or "hidden") or ""
 
   local wrapper = string.format([[
 -- Lovewright runtime wrapper
@@ -412,6 +431,9 @@ function Game.launch(options)
     self:close()
     error("Game runtime did not send ready event within " .. options.timeout .. "ms")
   end
+  -- How the window ended up when headless: "hidden" | "offscreen" |
+  -- "minimized" | "none" (see Game:headlessStatus)
+  self.headless_status = type(ready) == "table" and ready.headless or nil
 
   Trace.game_launched(self)
   Trace.record("game", "launch " .. tostring(options.path), {
@@ -624,6 +646,14 @@ end
 
 function Game:getObjects()
   return self:_request(protocol.MessageType.GET_OBJECTS)
+end
+
+--- How headless mode took effect in the launched game, as reported at
+-- connect time: { mode = requested, applied = "hidden" | "offscreen" |
+-- "minimized" | "none", note = reason a better mode was unavailable }.
+-- nil when the game was not launched headless.
+function Game:headlessStatus()
+  return self.headless_status
 end
 
 function Game:close()

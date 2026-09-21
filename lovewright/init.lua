@@ -12,6 +12,9 @@ local lovewright = {
   -- Global configuration (can be set before running tests)
   config = {
     headless = false,           -- Run games without a visible window
+    -- "hidden" | "offscreen" | "minimized" (fallback order); the
+    -- LOVEWRIGHT_HEADLESS_MODE environment variable overrides the default
+    headless_mode = os.getenv("LOVEWRIGHT_HEADLESS_MODE") or "hidden",
     trace = "off",              -- "off" | "on" | "retain-on-failure"
     trace_dir = "lovewright-traces",  -- Where trace HTML files are written
   },
@@ -33,6 +36,7 @@ Trace.config = lovewright.config
 -- @param options.width number Window width (default: 800)
 -- @param options.height number Window height (default: 600)
 -- @param options.headless boolean Run without visible window (default: lovewright.config.headless)
+-- @param options.headless_mode string "hidden" (default) | "offscreen" | "minimized"
 -- @param options.love_path string Path to love executable (default: "love")
 -- @param options.timeout number Connection timeout in ms (default: 5000)
 -- @param options.identity string Override save-directory identity for test isolation
@@ -44,6 +48,9 @@ function lovewright.launch(options)
   -- Apply global config defaults
   if options.headless == nil then
     options.headless = lovewright.config.headless
+  end
+  if options.headless_mode == nil then
+    options.headless_mode = lovewright.config.headless_mode
   end
   return Game.launch(options)
 end

@@ -179,6 +179,25 @@ describe("Simple Game", function()
     end)
   end)
 
+  describe("Headless mode", function()
+    it("reports how the window was taken off the screen", function()
+      local status = game:headlessStatus()
+      if not lovewright.config.headless then
+        -- launched with a visible window: nothing to report
+        expect(status):toBeNil()
+        return
+      end
+      print(string.format("      headless: requested %s, applied %s%s",
+        tostring(status.mode), tostring(status.applied),
+        status.note and (" (" .. tostring(status.note) .. ")") or ""))
+      expect(status.mode):toBe("hidden")
+      -- hidden where SDL is reachable, otherwise one of the fallbacks
+      expect(status.applied ~= "none"):toBeTruthy()
+      -- ...and the game still renders: a screenshot comes back
+      expect(game:screenshot("test_screenshot.png")):toBeTruthy()
+    end)
+  end)
+
   -- These tests are SKIPPED to demonstrate the skip functionality
   describe("Example Skipped Tests", function()
     it.skip("is skipped because feature not implemented yet", function()

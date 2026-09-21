@@ -175,9 +175,15 @@ local function accept_client()
 
     -- Send ready event
     debug_log("[lovewright] Sending ready event...")
+    local headless_status = nil
+    if state.headless then
+      local okH, hl = pcall(require, "lovewright.runtime.headless")
+      if okH then headless_status = hl.status() end
+    end
     local msg = protocol.event(protocol.MessageType.READY, {
       version = protocol.VERSION,
       frame = state.frame_count,
+      headless = headless_status,
     })
     local ok, err = send_all(client, protocol.frame(msg))
     if ok then
@@ -593,6 +599,11 @@ function runtime.init(options)
   options = options or {}
   state.headless = options.headless or false
   state.port = options.port  -- Use specific port if provided
+  if state.headless then
+    -- installed by the wrapper's love.load before the game ran
+    local okH, hl = pcall(require, "lovewright.runtime.headless")
+    state.headless_ctl = okH and hl or nil
+  end
 
   -- Clear old log
   local f = io.open(debug_log_path, "w")
@@ -639,6 +650,10 @@ function runtime.init(options)
     -- love.load - which runs AFTER this runtime initialises. Without this the
     -- draw hook is orphaned and every screenshot request goes unanswered.
     ensure_draw_hook()
+
+    -- Headless: a game that re-shows its window (setMode from saved
+    -- settings, a fullscreen toggle) gets it hidden again
+    if state.headless_ctl then state.headless_ctl.enforce() end
 
     accept_client()
     process_messages()

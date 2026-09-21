@@ -91,14 +91,14 @@ The `examples/` directory contains a simple game and test suite to demonstrate l
 # From the lovewright root directory
 lua examples/run_example_tests.lua
 
-# Run in headless mode (minimized window, faster execution)
+# Run in headless mode (no window at all, faster execution)
 lua examples/run_example_tests.lua --headless
 
-# For true headless on Linux CI, use Xvfb:
+# On a machine with no display (Linux CI), give it a virtual one:
 xvfb-run lua examples/run_example_tests.lua --headless
 ```
 
-**Note:** LÖVE2D requires a display context, so `--headless` minimizes the window rather than hiding it completely. For CI environments without a display, use Xvfb on Linux or a virtual display on Windows.
+**Headless mode.** LÖVE cannot render without a window (turn the window module off and there is no `love.draw` to screenshot), so lovewright keeps the window and makes it invisible: it is created far off-screen, hidden through SDL (`SDL_HideWindow`, called via LuaJIT's FFI since LÖVE has no Lua API for it) before the game's `love.load` runs, never takes keyboard focus, and is hidden again if the game re-creates it (`love.window.setMode` / `updateMode` are forced windowed and off-screen while headless). Rendering is unaffected: `love.draw` keeps running, screenshots and canvas readbacks return real pixels, and the loop runs faster with nothing composited (measured on Windows with LÖVE 12 / SDL3 / Vulkan). If SDL cannot be reached the window is parked off-screen, and failing that minimized, which was the old behaviour; `headless_mode = "offscreen"` or `"minimized"` picks one of those on purpose, and `game:headlessStatus()` reports what took effect. A machine with no display at all still needs a virtual one (Xvfb).
 
 This will:
 1. Launch the simple-game example with LÖVE2D
@@ -124,6 +124,7 @@ local game = lovewright.launch({
   width = 800,               -- Window width (default: 800)
   height = 600,              -- Window height (default: 600)
   headless = false,          -- Run without window (default: false)
+  headless_mode = "hidden",  -- "hidden" | "offscreen" | "minimized" when headless
   love_path = "love",        -- Path to love executable
   timeout = 5000,            -- Connection timeout in ms
   identity = "my-game-test", -- Optional: override save directory for test isolation
@@ -151,6 +152,7 @@ local enemies = game:locator({ type = "Enemy" })
 -- Locator methods
 player:exists()              -- Check if object exists
 player:get("health")         -- Get property value
+player:get("stats", 30000)   -- ...waiting up to 30s (lookup + read) for a slow getter or a game stuck in one long frame
 player:x(), player:y()       -- Shorthand for position
 player:isVisible()           -- Check visibility
 player:waitFor(timeout)      -- Wait for object to exist
