@@ -62,14 +62,21 @@ function Trace.begin(suite_name, test_name)
     test = test_name,
     start = now(),
     events = {},
+    steps = {},   -- open step groups, innermost last (see Trace.step_begin)
     index = counter,
   }
+end
+
+-- Append an event to the innermost open step, or the top-level timeline
+local function push(event)
+  local open = current.steps[#current.steps]
+  table.insert(open and open.children or current.events, event)
 end
 
 --- Record a timeline event. details is an optional table of key -> scalar.
 function Trace.record(event_type, label, details)
   if not current then return end
-  table.insert(current.events, {
+  push({
     t = now() - current.start,
     type = event_type,
     label = label,
@@ -80,7 +87,7 @@ end
 --- Attach an already-encoded base64 PNG to the timeline
 function Trace.attach(b64_png, label)
   if not current or not b64_png then return end
-  table.insert(current.events, {
+  push({
     t = now() - current.start,
     type = "screenshot",
     label = label or "screenshot",
@@ -106,6 +113,31 @@ function Trace.action(game, label, details)
   if mode() == "on" and game then
     Trace.snapshot(game, "after " .. label)
   end
+end
+
+--- Open a step group: events recorded until the matching step_end nest
+-- under it (lovewright.step drives these)
+function Trace.step_begin(name)
+  if not current then return end
+  local group = {
+    t = now() - current.start,
+    type = "step",
+    label = name,
+    children = {},
+  }
+  push(group)
+  table.insert(current.steps, group)
+end
+
+--- Close the innermost step group. err is the error text when the step
+-- failed and the error started there (not in a nested step)
+function Trace.step_end(status, err)
+  if not current then return end
+  local group = table.remove(current.steps)
+  if not group then return end
+  group.duration = now() - current.start - group.t
+  group.status = status
+  group.error = err
 end
 
 -- Game registry hooks (called from Game.launch/close)
@@ -147,6 +179,18 @@ local function details_string(details)
   return table.concat(parts, "  ")
 end
 
+-- Number of events in a timeline, counting those nested in steps
+local function count_events(events)
+  local n = 0
+  for _, event in ipairs(events) do
+    n = n + 1
+    if event.children then
+      n = n + count_events(event.children)
+    end
+  end
+  return n
+end
+
 -- Write the trace as a self-contained HTML file; returns the file path
 function Trace.write_html(trace)
   local dir = Trace.config.trace_dir or "lovewright-traces"
@@ -185,6 +229,16 @@ function Trace.write_html(trace)
     .badge.wait { background: #8e44ad; }
     .badge.screenshot { background: #d35400; }
     .badge.game { background: #16a085; }
+    .badge.step { background: #34495e; }
+    td.step-cell { padding: 4px 0 4px 10px; }
+    td td { font-size: 1em; }
+    details.step > summary { cursor: pointer; padding: 2px 0; }
+    details.step > summary .time { color: #f39c12; font-family: monospace; display: inline-block; width: 70px; }
+    details.step.passed > summary .mark { color: #2ecc71; }
+    details.step.failed > summary .mark { color: #e74c3c; }
+    details.step.failed > summary { color: #ff8a80; }
+    details.step > table { margin-left: 18px; width: calc(100%% - 18px); border-left: 2px solid #0f3460; }
+    details.step > .error { margin: 6px 0 6px 18px; }
     .detail { opacity: 0.7; font-family: monospace; font-size: 0.85em; }
     .shot img { max-width: 100%%; border: 1px solid #0f3460; border-radius: 6px; margin-top: 6px; }
     footer { text-align: center; padding: 25px; opacity: 0.6; font-size: 0.9em; }
@@ -194,7 +248,7 @@ function Trace.write_html(trace)
   <header>
     <h1>%s</h1>
     <div class="suite">%s</div>
-    <div class="meta"><span class="status">%s</span> &nbsp; %.2fs &nbsp; %d events</div>
+    <div class="meta"><span class="status">%s</span> &nbsp; %.2fs &nbsp; %d events%s</div>
   </header>
   <div class="container">
 ]],
@@ -204,38 +258,60 @@ function Trace.write_html(trace)
     escape_html(trace.suite),
     escape_html(string.upper(trace.status)),
     trace.duration or 0,
-    #trace.events
+    count_events(trace.events),
+    trace.step and (' &nbsp; failed in step <b>' .. escape_html(trace.step) .. '</b>') or ""
   ))
 
   if trace.error then
     table.insert(parts, '    <div class="error">' .. escape_html(trace.error) .. "</div>\n")
   end
 
-  table.insert(parts, "    <table>\n")
+  -- One timeline row per event; steps become collapsible groups holding
+  -- their own rows (failed steps start open, passed ones collapsed)
+  local function render(events, indent)
+    if #events == 0 then return end
+    table.insert(parts, indent .. "<table>\n")
+    for _, event in ipairs(events) do
+      local badge_class = event.type
+      if event.type == "assert:pass" then badge_class = "assert-pass" end
+      if event.type == "assert:fail" then badge_class = "assert-fail" end
 
-  for _, event in ipairs(trace.events) do
-    local badge_class = event.type
-    if event.type == "assert:pass" then badge_class = "assert-pass" end
-    if event.type == "assert:fail" then badge_class = "assert-fail" end
-
-    if event.image then
-      table.insert(parts, string.format(
-        '      <tr><td class="time">+%.2fs</td><td class="type"><span class="badge screenshot">screenshot</span></td>' ..
-        '<td class="shot">%s<br><img src="data:image/png;base64,%s" loading="lazy"></td></tr>\n',
-        event.t, escape_html(event.label), event.image
-      ))
-    else
-      table.insert(parts, string.format(
-        '      <tr><td class="time">+%.2fs</td><td class="type"><span class="badge %s">%s</span></td>' ..
-        '<td>%s <span class="detail">%s</span></td></tr>\n',
-        event.t, badge_class, escape_html(event.type), escape_html(event.label),
-        escape_html(details_string(event.details))
-      ))
+      if event.type == "step" then
+        local failed = event.status == "failed"
+        local mark = failed and "&#10007;" or (event.status == "passed" and "&#10003;" or "&hellip;")
+        table.insert(parts, string.format(
+          '%s  <tr><td colspan="3" class="step-cell"><details class="step %s"%s><summary>' ..
+          '<span class="time">+%.2fs</span> <span class="badge step">step</span> ' ..
+          '<span class="mark">%s</span> %s <span class="detail">%s</span></summary>\n',
+          indent, failed and "failed" or "passed", failed and " open" or "",
+          event.t, mark, escape_html(event.label),
+          event.duration and string.format("%.2fs", event.duration) or "unfinished"
+        ))
+        if event.error then
+          table.insert(parts, indent .. '    <div class="error">' .. escape_html(event.error) .. "</div>\n")
+        end
+        render(event.children, indent .. "    ")
+        table.insert(parts, indent .. "  </details></td></tr>\n")
+      elseif event.image then
+        table.insert(parts, string.format(
+          '%s  <tr><td class="time">+%.2fs</td><td class="type"><span class="badge screenshot">screenshot</span></td>' ..
+          '<td class="shot">%s<br><img src="data:image/png;base64,%s" loading="lazy"></td></tr>\n',
+          indent, event.t, escape_html(event.label), event.image
+        ))
+      else
+        table.insert(parts, string.format(
+          '%s  <tr><td class="time">+%.2fs</td><td class="type"><span class="badge %s">%s</span></td>' ..
+          '<td>%s <span class="detail">%s</span></td></tr>\n',
+          indent, event.t, badge_class, escape_html(event.type), escape_html(event.label),
+          escape_html(details_string(event.details))
+        ))
+      end
     end
+    table.insert(parts, indent .. "</table>\n")
   end
+  render(trace.events, "    ")
 
   table.insert(parts, [[
-    </table>
   </div>
   <footer>Generated by Lovewright trace</footer>
 </body>
@@ -251,8 +327,9 @@ function Trace.write_html(trace)
   return filename
 end
 
---- Finish the current trace; returns the written file path (or nil)
-function Trace.finish(status, err)
+--- Finish the current trace; returns the written file path (or nil).
+-- step is the "outer > inner" path of the step the failure came from
+function Trace.finish(status, err, step)
   local trace = current
   if not trace then
     current = nil
@@ -264,6 +341,10 @@ function Trace.finish(status, err)
     current = nil
     return nil
   end
+
+  -- Steps still open (none, unless a step body never returned) end here;
+  -- the failure screenshot below then lands on the top-level timeline
+  trace.steps = {}
 
   -- On failure, grab a final screenshot from the most recently launched game
   if status == "failed" then
@@ -277,6 +358,7 @@ function Trace.finish(status, err)
   trace.duration = now() - trace.start
   trace.status = status
   trace.error = err and tostring(err) or nil
+  trace.step = step
 
   return Trace.write_html(trace)
 end

@@ -12,6 +12,7 @@ An automated test framework for LÖVE2D applications, inspired by [Playwright](h
 - **Screenshots** - Capture game frames and compare against snapshots
 - **Headless mode** - Run tests without a visible window for CI/CD
 - **Auto-waiting** - Wait for objects or conditions before assertions
+- **Test steps** - `lovewright.step` (Playwright's `test.step`) groups a test into named phases in traces, reports and failure output
 
 ## Installation
 
@@ -112,7 +113,8 @@ The example tests demonstrate:
 - Waiting for conditions (`game:waitFor(...)`)
 - Screenshot capture (`game:screenshot("test.png")`)
 - **Skipped tests** - Two tests using `it.skip()` to show skip functionality
-- **Intentional failures** - Three tests that purposely fail to show failure output
+- **Test steps** - `lovewright.step` grouping a test into named phases (`examples/tests/step_test.lua` checks the step API itself, no game needed)
+- **Intentional failures** - Four tests that purposely fail to show failure output, one of them inside a nested step
 
 ## API Reference
 
@@ -226,6 +228,50 @@ player:waitFor(5000)           -- Wait to exist
 player:waitForDetached(5000)   -- Wait to not exist
 ```
 
+### Steps
+
+`lovewright.step(name, fn)` is lovewright's version of Playwright's
+`test.step`: it runs `fn` as a named step of the current test and returns
+whatever `fn` returns. Steps nest. They do not change what a test does;
+they make it easier to read when it fails:
+
+- the console names the innermost step the failure came from
+  (`In step: open the menu > check the Start button`), as do the summary at
+  the end of the run, the HTML report and GitHub Actions annotations
+- the HTML report shows each test's step outline (open for failed tests)
+- traces group the actions, waits, assertions and screenshots of a step
+  under it: failed steps are expanded, passed steps collapsed
+
+```lua
+local lovewright = require("lovewright")
+local it, expect, step = lovewright.it, lovewright.expect, lovewright.step
+
+it("collects the coin", function()
+  local player = game:locator("Player")
+
+  local startScore = step("read the score", function()
+    return player:get("score")          -- a step returns fn's results
+  end)
+
+  step("walk onto the coin", function()
+    game:keyboard():hold("up", 0.6)
+    step("cross to the right", function()  -- steps nest
+      game:keyboard():hold("right", 1.2)
+    end)
+  end)
+
+  step("the score went up", function()
+    game:waitFor(function() return player:get("score") > startScore end, 5000)
+  end)
+end)
+```
+
+It is also available as `lovewright.it.step` and, with the Playwright-style
+alias `lovewright.test` (= `lovewright.it`), as `test.step`. Errors pass
+through a step unchanged (same value, same message), so a `pcall` around a
+step sees exactly what `fn` raised. Steps work in hooks too (`beforeEach`,
+`beforeAll`, ...): a failing hook reports its step the same way.
+
 ### Screenshots
 
 ```lua
@@ -257,6 +303,9 @@ lovewright.config.trace_dir = "lovewright-traces"  -- output directory
   tests (recommended; negligible overhead on passing tests)
 - `"on"` — a trace is written for every test, with a screenshot after every
   input action (slower, but a full visual replay)
+
+Events recorded inside a [step](#steps) nest under it in the timeline, and
+the trace header names the step a failing test failed in.
 
 ### Test Structure
 

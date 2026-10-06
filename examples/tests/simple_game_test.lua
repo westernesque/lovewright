@@ -6,6 +6,7 @@ package.path = "./?.lua;./?/init.lua;" .. package.path
 
 local lovewright = require("lovewright")
 local describe, it, expect = lovewright.describe, lovewright.it, lovewright.expect
+local step = lovewright.step
 
 describe("Simple Game", function()
   local game
@@ -111,17 +112,22 @@ describe("Simple Game", function()
       local player = game:locator("Player")
       local coin = game:locator("Coin")
 
-      -- Move player to coin (player at 400,300 -> coin at 600,200)
-      -- First move up to y=200 (100px at 200px/s = 0.5s), then right to x=600
-      game:keyboard():hold("up", 0.6)
-      game:keyboard():hold("right", 1.2)
+      -- Steps group the trace timeline and name the phase a failure is in
+      step("walk the player onto the coin", function()
+        -- Move player to coin (player at 400,300 -> coin at 600,200)
+        -- First move up to y=200 (100px at 200px/s = 0.5s), then right to x=600
+        game:keyboard():hold("up", 0.6)
+        game:keyboard():hold("right", 1.2)
 
-      -- Give time for collision
-      game:waitFor(function()
-        return player:get("score") > 0
-      end, 5000)
+        -- Give time for collision
+        game:waitFor(function()
+          return player:get("score") > 0
+        end, 5000)
+      end)
 
-      expect(coin):toBeHidden()
+      step("the coin is gone", function()
+        expect(coin):toBeHidden()
+      end)
     end)
 
     it("increases score when collected", function()
@@ -231,6 +237,21 @@ describe("Simple Game", function()
       local player = game:locator("Player")
       -- Player starts at x=400, which is not greater than 500
       expect(player:get("x")):toBeGreaterThan(500)
+    end)
+
+    it("demonstrates a failure inside a step", function()
+      local player = game:locator("Player")
+      local startX = step("read the start position", function()
+        return player:get("x")
+      end)
+      step("walk right", function()
+        game:keyboard():hold("right", 0.3)
+        step("check the player moved left", function()
+          -- Walking right increases x: reported as "In step: walk right >
+          -- check the player moved left"
+          expect(player:get("x")):toBeLessThan(startX)
+        end)
+      end)
     end)
   end)
 end)

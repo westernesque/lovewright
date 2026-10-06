@@ -26,6 +26,7 @@ local Runner = require("lovewright.runner")
 local ExpectModule = require("lovewright.expect")
 local Screenshot = require("lovewright.screenshot")
 local Trace = require("lovewright.trace")
+local Step = require("lovewright.step")
 
 -- Traces read the shared config table (mode and output dir)
 Trace.config = lovewright.config
@@ -65,15 +66,30 @@ lovewright.describe = setmetatable({
   end,
 })
 
---- Define a test case (callable table with .only and .skip modifiers)
+--- Run fn as a named test step (Playwright's test.step) and return its
+-- results. Steps nest; they group the trace timeline and the HTML report,
+-- and a failing test names the innermost step its error came from. Errors
+-- are rethrown unchanged.
+-- @param name string Step name
+-- @param fn function Step body
+-- @return any Whatever fn returns
+function lovewright.step(name, fn)
+  return Step.run(name, fn)
+end
+
+--- Define a test case (callable table with .only, .skip and .step)
 lovewright.it = setmetatable({
   only = Runner.it_only,
   skip = Runner.it_skip,
+  step = lovewright.step,
 }, {
   __call = function(_, name, fn)
     return Runner.it(name, fn)
   end,
 })
+
+--- Playwright-style alias: test("name", fn), test.step("name", fn)
+lovewright.test = lovewright.it
 
 --- Run before each test in the current suite
 -- @param fn function Hook function

@@ -168,6 +168,14 @@ function Reporter.generate_html(results, options)
       white-space: pre-wrap;
       word-break: break-word;
     }
+    .test-row .in-step { margin-top: 6px; font-size: 0.9em; color: #ff8a80; }
+    .test-row details.steps { margin-top: 6px; font-size: 0.88em; }
+    .test-row details.steps > summary { cursor: pointer; opacity: 0.8; }
+    .test-row ul.steps { list-style: none; margin-left: 18px; border-left: 2px solid #0f3460; padding-left: 8px; }
+    .test-row ul.steps li { margin: 2px 0; }
+    .test-row ul.steps .ok { color: #2ecc71; }
+    .test-row ul.steps .bad { color: #e74c3c; }
+    .test-row ul.steps .dur { opacity: 0.6; font-size: 0.9em; margin-left: 6px; }
     .failure .trace-link { margin-top: 10px; }
     .failure .trace-link a { color: #667eea; text-decoration: none; }
     .failure .trace-link a:hover { text-decoration: underline; }
@@ -255,6 +263,22 @@ function Reporter.generate_html(results, options)
     return string.format('<a href="%s">📋 trace</a>', escape_html(href))
   end
 
+  -- Nested list of a test's steps: mark, name, duration
+  local function steps_list(steps)
+    local out = '<ul class="steps">'
+    for _, step in ipairs(steps) do
+      local failed = step.status == "failed"
+      out = out .. string.format('<li><span class="%s">%s</span> %s%s%s</li>',
+        failed and "bad" or "ok",
+        failed and "✗" or "✓",
+        escape_html(step.name),
+        step.duration and string.format('<span class="dur">%s</span>', format_duration(step.duration)) or "",
+        (step.children and #step.children > 0) and steps_list(step.children) or ""
+      )
+    end
+    return out .. "</ul>"
+  end
+
   local tests = results.tests or {}
 
   if #tests > 0 then
@@ -279,6 +303,16 @@ function Reporter.generate_html(results, options)
       local error_block = t.error
         and string.format('<div class="error">%s</div>', escape_html(t.error))
         or ""
+      if t.step and status == "failed" then
+        error_block = string.format('<div class="in-step">In step: <b>%s</b></div>', escape_html(t.step))
+          .. error_block
+      end
+      -- Step outline: open for failed tests, collapsed otherwise
+      if t.steps and #t.steps > 0 then
+        error_block = error_block .. string.format(
+          '<details class="steps"%s><summary>steps (%d)</summary>%s</details>',
+          status == "failed" and " open" or "", #t.steps, steps_list(t.steps))
+      end
 
       html = html .. string.format([[
       <div class="test-row %s">
@@ -389,9 +423,10 @@ function Reporter.github_actions(results)
       for _, t in ipairs(tests) do
         if t.status == "failed" then
           f:write(string.format(
-            "\n<details><summary>❌ %s &gt; %s%s</summary>\n\n```\n%s\n```\n</details>\n",
+            "\n<details><summary>❌ %s &gt; %s%s%s</summary>\n\n```\n%s\n```\n</details>\n",
             t.suite, t.test,
             (t.phase and t.phase ~= "test") and (" (" .. t.phase .. ")") or "",
+            t.step and (" — in step: " .. t.step) or "",
             t.error or "unknown error"
           ))
         end
@@ -411,7 +446,8 @@ function Reporter.github_actions(results)
       if t.status == "failed" then
         print(string.format("::error title=%s::%s",
           escape_annotation_property(t.suite .. " > " .. t.test),
-          escape_annotation_message(t.error or "test failed")))
+          escape_annotation_message((t.step and ("In step: " .. t.step .. "\n") or "")
+            .. (t.error or "test failed"))))
       end
     end
   end

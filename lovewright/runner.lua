@@ -18,7 +18,7 @@ local state = {
     skipped = 0,
     total = 0,
     failures = {},
-    tests = {},           -- Every test in run order: {suite, test, status, duration, error?, phase?, trace?}
+    tests = {},           -- Every test in run order: {suite, test, status, duration, error?, phase?, step?, steps?, trace?}
     duration = 0,
   },
 }
@@ -208,6 +208,7 @@ end
 -- Run a single test
 local function run_test(test, suite_name, hooks)
   local Trace = require("lovewright.trace")
+  local Step = require("lovewright.step")
 
   state.results.total = state.results.total + 1
 
@@ -228,10 +229,11 @@ local function run_test(test, suite_name, hooks)
   local start_time = os.clock()
 
   Trace.begin(suite_name, test.name)
+  Step.reset()
 
   -- Finish the trace, remember its path, and print it for failures
   local function finish_trace(failure, status, err)
-    local trace_path = Trace.finish(status, err)
+    local trace_path = Trace.finish(status, err, failure and failure.step)
     if trace_path then
       record.trace = trace_path
       if failure then
@@ -243,17 +245,31 @@ local function run_test(test, suite_name, hooks)
 
   local function record_failure(err, phase)
     state.results.failed = state.results.failed + 1
+    local step = Step.failed_in(err)
     record.status = "failed"
     record.error = tostring(err)
     record.phase = phase
+    record.step = step
     local failure = {
       suite = suite_name,
       test = test.name,
       error = tostring(err),
       phase = phase,
+      step = step,
     }
     table.insert(state.results.failures, failure)
+    if step then
+      io.write("    In step: " .. step .. "\n")
+    end
     return failure
+  end
+
+  -- Keep the step outline for the report (only tests that used steps)
+  local function keep_steps()
+    local steps = Step.tree()
+    if #steps > 0 then
+      record.steps = steps
+    end
   end
 
   -- Run beforeEach hooks
@@ -265,8 +281,9 @@ local function run_test(test, suite_name, hooks)
 
   if not ok then
     io.write("FAIL (beforeEach failed)\n")
-    io.write("    Error: " .. tostring(err):gsub("\n", "\n    ") .. "\n")
     local failure = record_failure(err, "beforeEach")
+    io.write("    Error: " .. tostring(err):gsub("\n", "\n    ") .. "\n")
+    keep_steps()
     finish_trace(failure, "failed", err)
     return
   end
@@ -291,6 +308,8 @@ local function run_test(test, suite_name, hooks)
       hook()
     end
   end)
+
+  keep_steps()
 
   if ok then
     if after_ok then
@@ -355,13 +374,19 @@ local function run_suite(suite, parent_name, parent_hooks)
 
   -- Run beforeAll (traced so setup/launch failures are diagnosable)
   local Trace = require("lovewright.trace")
+  local Step = require("lovewright.step")
   Trace.begin(full_name, "(suite setup)")
+  Step.reset()
   local ok, err = pcall(function()
     run_hooks(suite.before_all)
   end)
 
   if not ok then
+    local step = Step.failed_in(err)
     io.write("  beforeAll failed: " .. tostring(err) .. "\n")
+    if step then
+      io.write("    In step: " .. step .. "\n")
+    end
     -- Count as a failure so runners exit non-zero
     state.results.failed = state.results.failed + 1
     local failure = {
@@ -369,17 +394,21 @@ local function run_suite(suite, parent_name, parent_hooks)
       test = "(suite setup)",
       error = tostring(err),
       phase = "beforeAll",
+      step = step,
     }
     table.insert(state.results.failures, failure)
+    local steps = Step.tree()
     local record = {
       suite = full_name,
       test = "(suite setup)",
       status = "failed",
       error = tostring(err),
       phase = "beforeAll",
+      step = step,
+      steps = #steps > 0 and steps or nil,
     }
     table.insert(state.results.tests, record)
-    local trace_path = Trace.finish("failed", err)
+    local trace_path = Trace.finish("failed", err, step)
     if trace_path then
       failure.trace = trace_path
       record.trace = trace_path
@@ -524,6 +553,9 @@ function Runner.run(options)
       ))
       if failure.phase ~= "test" then
         print("   (in " .. failure.phase .. ")")
+      end
+      if failure.step then
+        print("   In step: " .. failure.step)
       end
       print("   " .. failure.error:gsub("\n", "\n   "))
     end
