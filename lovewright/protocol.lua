@@ -3,7 +3,11 @@
 
 local protocol = {}
 
-protocol.BASE_PORT = 39840  -- Higher port to avoid conflicts
+-- Below the OS's ephemeral range (Linux hands out 32768+, Windows 49152+):
+-- a port in it can be given to the runner's own connect() while the game is
+-- still booting, and Linux then connects the socket to itself (the game's
+-- bind fails with "address already in use" and no ready event ever comes)
+protocol.BASE_PORT = 13840
 
 -- Port offset for this run (randomized to avoid TIME_WAIT conflicts)
 local port_offset = (os.time() % 100) * 10  -- 0-990 offset

@@ -490,6 +490,15 @@ function Game.launch(options)
     local client = socket.tcp()
     client:settimeout(0.1)
     local ok, err = client:connect("127.0.0.1", self.port)
+    local _, local_port = client:getsockname()
+    if ok and tonumber(local_port) == self.port then
+      -- TCP self-connect: nobody listens yet and the OS gave this socket
+      -- the very port it dials (Linux, port in the ephemeral range), so it
+      -- reached itself. Drop it with an RST (linger 0) - a plain close sits
+      -- in TIME_WAIT on the port and the game's bind fails - and retry
+      client:setoption("linger", { on = true, timeout = 0 })
+      ok = false
+    end
     if ok then
       self.socket = client
       self.socket:settimeout(0)
