@@ -16,6 +16,8 @@
 -- on Windows a holder keeps its file OPEN, and an open file cannot be
 -- deleted - so a file that CAN be deleted belonged to a dead process. On
 -- other platforms the file holds the runner's pid, checked with kill -0.
+-- (Windows: the files are opened non-inheritable, so a game the runner
+-- launched cannot keep a dead runner's lock "alive" by holding its handle.)
 --
 --   local Lock = require("lovewright.lock")
 --   local held = Lock.acquire("exclusive", { label = "perf run" })
@@ -114,9 +116,21 @@ local function token()
   return string.format("%x%s%x", math.floor(now() * 1000) % 0x100000000, addr:sub(-6), counter)
 end
 
+-- Open a lock file for writing. On Windows NOT inheritable ("N", MSVCRT /
+-- UCRT): the runner launches games through os.execute("start ..."), and an
+-- inherited handle kept the lock file open - its holder "alive" - in the
+-- game for as long as the game ran, long after the runner itself had died.
+local function open_held(path)
+  if is_windows then
+    local ok, f = pcall(io.open, path, "wbN")
+    if ok and f then return f end
+  end
+  return io.open(path, "wb")
+end
+
 -- Open `path` as a held lock file describing its owner. Returns the handle.
 local function hold(path, info)
-  local f = assert(io.open(path, "wb"), "lovewright.lock: cannot create " .. path)
+  local f = assert(open_held(path), "lovewright.lock: cannot create " .. path)
   f:write(string.format("label=%s\nkey=%s\npid=%s\nsince=%s\n",
     info.label or "", info.key or "", tostring(pid() or ""), os.date("%Y-%m-%d %H:%M:%S")))
   f:flush()
@@ -342,6 +356,13 @@ function Lock.acquire(mode, opts)
     end
     sleep(1)
   end
+end
+
+--- Whether the holder of lock file `path` is still alive. A dead holder's
+-- file is removed on the way (as a scan would). False when there is no file.
+function Lock.holder_alive(path)
+  if not path or path == "" or not read(path) then return false end
+  return not reap(path)
 end
 
 --- Who holds or waits for the lock right now (for diagnostics)

@@ -458,6 +458,11 @@ local function handle_message(msg)
   local msg_type = data.type
   local id = data.id
   local params = data.params or {}
+  if state.token and params.token == state.token then
+    -- isolated run: the launcher that started this game claimed it (a
+    -- runner of another run that reached our port never sends our token)
+    state.claimed = true
+  end
 
   if msg_type == protocol.MessageType.PING then
     return protocol.response(id, { pong = true, frame = state.frame_count })
@@ -559,6 +564,13 @@ local function process_messages()
     state.client = nil
     state.connected = false
     state.buffer = ""
+    if state.claimed and not state.orphaned_at then
+      -- our runner went away without shutting us down (it died or was
+      -- stopped): nobody will ever close this game, so quit
+      debug_log("[lovewright] Runner gone - quitting")
+      state.orphaned_at = love.timer.getTime()
+      love.event.quit()
+    end
     return
   end
 
@@ -662,6 +674,11 @@ function runtime.init(options)
     -- Headless: a game that re-shows its window (setMode from saved
     -- settings, a fullscreen toggle) gets it hidden again
     if state.headless_ctl then state.headless_ctl.enforce() end
+
+    -- a game whose love.quit refused the orphan quit is ended for good
+    if state.orphaned_at and love.timer.getTime() - state.orphaned_at > 5 then
+      os.exit(1)
+    end
 
     accept_client()
     process_messages()

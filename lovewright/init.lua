@@ -26,6 +26,10 @@ local lovewright = {
     -- lock otherwise. LOVEWRIGHT_LOCK=off disables it
     lock = nil,
     lock_dir = nil,             -- default <TEMP>/lovewright/locks (LOVEWRIGHT_LOCK_DIR)
+    -- Hang watchdog (seconds): a game that answers nothing for this long
+    -- while the runner waits on it is killed and the test fails.
+    -- LOVEWRIGHT_HANG_TIMEOUT overrides; 0 = off
+    hang_timeout = tonumber(os.getenv("LOVEWRIGHT_HANG_TIMEOUT") or "") or 300,
   },
 }
 
@@ -55,6 +59,7 @@ Trace.config = lovewright.config
 -- @param options.exclude table Dir/file names to skip when copying the game (".git" always skipped)
 -- @param options.args table Extra command-line arguments for the game (read from LÖVE's `arg`)
 -- @param options.isolated boolean Isolated run (default: lovewright.config.isolated)
+-- @param options.hang_timeout number Hang watchdog seconds (default: lovewright.config.hang_timeout)
 -- @return Game Game controller instance
 function lovewright.launch(options)
   options = options or {}
@@ -67,6 +72,9 @@ function lovewright.launch(options)
   end
   if options.headless_mode == nil then
     options.headless_mode = lovewright.config.headless_mode
+  end
+  if options.hang_timeout == nil then
+    options.hang_timeout = lovewright.config.hang_timeout
   end
   return Game.launch(options)
 end
@@ -169,7 +177,14 @@ function lovewright.run(options)
       key = (mode == "shared" and config.isolated) and Isolation.run_id() or nil,
     })
   end
+  Game.owner_lock = held and held.path or nil
   local ok, results = pcall(Runner.run, options)
+  -- games a suite left open (or an error skipped closing) die with the run
+  local left = Game.close_all()
+  if left > 0 then
+    print("[lovewright] closed " .. left .. " game(s) left open at the end of the run")
+  end
+  Game.owner_lock = nil
   if held then
     held:release()
   end

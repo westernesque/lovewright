@@ -7,6 +7,12 @@ local Trace = require("lovewright.trace")
 local Game = {}
 Game.__index = Game
 
+-- Games launched by this process and not closed yet (Game.close_all)
+Game.live = {}
+-- The run lock file this runner holds (set by lovewright.run), recorded
+-- with each isolated game so a later run can tell whether its runner died
+Game.owner_lock = nil
+
 -- Platform detection
 local is_windows = package.config:sub(1, 1) == "\\"
 
@@ -141,6 +147,11 @@ local defaults = {
   headless_mode = "hidden",  -- "hidden" | "offscreen" | "minimized" (see runtime/headless.lua)
   love_path = "love",
   timeout = 5000,  -- Connection timeout in ms
+  -- Hang watchdog: once the game has answered nothing for this many seconds
+  -- while requests wait on it, it is killed and the request fails (and
+  -- every later one at once, instead of each waiting out its timeout).
+  -- 0 / false = off
+  hang_timeout = 300,
 }
 
 -- Get the directory containing lovewright
@@ -394,6 +405,108 @@ local function get_temp_dir()
   return lw_tmp
 end
 
+-- Orphaned games. An isolated run records every game it launches in
+-- <TEMP>/lovewright/runs/<run id>.games as "<pid>\t<wrapper>\t<lock file>",
+-- the lock file being the run lock its runner holds. When a runner dies
+-- without closing its games (killed, stopped), the game normally quits by
+-- itself once it sees the connection drop (runtime: a claimed client that
+-- disconnects) - but a game stuck inside one long frame cannot. So the
+-- next isolated launch with the same run id kills each recorded game whose
+-- runner is gone (its lock file is deletable / missing), that is still a
+-- running love process and whose wrapper still names that pid: only games
+-- this checkout's own runs started, never one found by image name.
+local function games_file(run_id)
+  local dir = get_temp_dir() .. "/runs"
+  mkdir(dir)
+  return dir .. "/" .. run_id .. ".games"
+end
+
+local function read_games(run_id)
+  local list = {}
+  local s = read_file(games_file(run_id))
+  for line in (s or ""):gmatch("[^\r\n]+") do
+    local pid, wrapper, lock = line:match("^(%d+)\t([^\t]*)\t?(.*)$")
+    if pid then list[#list + 1] = { pid = pid, wrapper = wrapper, lock = lock or "" } end
+  end
+  return list
+end
+
+local function write_games(run_id, list)
+  local out = {}
+  for _, g in ipairs(list) do
+    out[#out + 1] = g.pid .. "\t" .. g.wrapper .. "\t" .. (g.lock or "") .. "\n"
+  end
+  local f = io.open(games_file(run_id), "wb")
+  if f then
+    f:write(table.concat(out))
+    f:close()
+  end
+end
+
+-- `pid` is a running love process
+local function love_alive(pid)
+  if is_windows then
+    local p = io.popen('tasklist /FI "PID eq ' .. pid .. '" /FO CSV /NH 2>nul')
+    local alive = false
+    if p then
+      for line in p:lines() do
+        if line:match('^"[Ll][Oo][Vv][Ee][^"]*","' .. pid .. '"') then alive = true end
+      end
+      p:close()
+    end
+    return alive
+  end
+  local r = os.execute("kill -0 " .. pid .. " 2>/dev/null")
+  return r == 0 or r == true
+end
+
+local function reap_orphans(run_id)
+  local list = read_games(run_id)
+  if #list == 0 then return end
+  local Lock = require("lovewright.lock")
+  local keep = {}
+  for _, g in ipairs(list) do
+    local mine = false
+    for live in pairs(Game.live) do
+      if live.process_info and live.process_info.pid == g.pid then mine = true end
+    end
+    if mine or (g.lock ~= "" and g.lock == Game.owner_lock) then
+      keep[#keep + 1] = g
+    elseif love_alive(g.pid) then
+      if g.lock == "" or Lock.holder_alive(g.lock) then
+        keep[#keep + 1] = g          -- its runner may be alive: not ours to judge
+      elseif read_pid(g.wrapper .. "/_lovewright_pid") == g.pid then
+        print("[lovewright] killing orphaned game pid " .. g.pid .. " of a dead run " .. run_id)
+        kill_process({ pid = g.pid })
+        rmdir(g.wrapper)
+      end
+    elseif g.wrapper:find("wrapper_" .. run_id .. "_", 1, true) and read_pid(g.wrapper .. "/_lovewright_pid") == g.pid then
+      rmdir(g.wrapper)                 -- a game that quit by itself: its copy is left
+    end
+  end
+  write_games(run_id, keep)
+end
+
+local function record_game(game)
+  local pid = game.process_info and game.process_info.pid
+  local run_id = game.options.run_id
+  if not (pid and run_id) then return end
+  local list = read_games(run_id)
+  list[#list + 1] = { pid = pid, wrapper = game.wrapper_path, lock = Game.owner_lock or "" }
+  write_games(run_id, list)
+  game.recorded_pid = pid
+end
+
+local function forget_game(game)
+  if not game.recorded_pid then return end
+  local keep = {}
+  for _, g in ipairs(read_games(game.options.run_id)) do
+    if g.pid ~= game.recorded_pid then keep[#keep + 1] = g end
+  end
+  write_games(game.options.run_id, keep)
+  game.recorded_pid = nil
+end
+
 -- Launch LÖVE2D with the game
 function Game.launch(options)
   options = options or {}
@@ -417,6 +530,7 @@ function Game.launch(options)
     options.run_id = Isolation.run_id()
     options.token = Isolation.token()
     options.identity = (options.identity or "lovewright") .. "-" .. options.run_id
+    reap_orphans(options.run_id)
   end
 
   local self = setmetatable({}, Game)
@@ -428,6 +542,8 @@ function Game.launch(options)
   self.request_id = 0
   self.pending_requests = {}
   self.frame_count = 0
+  self.hang_timeout = tonumber(options.hang_timeout) or 0
+  self.quiet_since = nil   -- since when requests have waited on a silent game
 
   -- Get unique port for this instance (isolated: a free one at random,
   -- not BASE_PORT + the time, which another runner may be counting up from)
@@ -533,7 +649,12 @@ function Game.launch(options)
       error("Connected to a game from another run on port " .. tostring(self.port) .. " (launch token mismatch)")
     end
     self.process_info.pid = self.process_info.pid or read_pid(wrapper_path .. "/_lovewright_pid")
+    -- claim the game: from now on it quits by itself when this runner's
+    -- connection drops without a shutdown (the runner died or was stopped)
+    pcall(self._request, self, protocol.MessageType.PING, { token = options.token }, options.timeout)
+    record_game(self)
   end
+  Game.live[self] = true
   -- How the window ended up when headless: "hidden" | "offscreen" |
   -- "minimized" | "none" (see Game:headlessStatus)
   self.headless_status = type(ready) == "table" and ready.headless or nil
@@ -550,10 +671,43 @@ function Game.launch(options)
   return self
 end
 
+-- Hang watchdog bookkeeping: a request or wait starts the silence clock
+-- (unless it already runs: requests that time out one after another add
+-- up), and any bytes from the game stop it
+function Game:_expect()
+  if not self.quiet_since then
+    self.quiet_since = require("socket").gettime()
+  end
+end
+
+-- Kill the game and fail when it has been silent for hang_timeout seconds
+function Game:_watchdog()
+  local limit = self.hang_timeout
+  if not limit or limit <= 0 or not self.quiet_since then return end
+  local quiet = require("socket").gettime() - self.quiet_since
+  if quiet < limit then return end
+  self.hung = string.format("the game sent nothing for %.0f s (hang watchdog, hang_timeout = %s s) and was killed",
+    quiet, tostring(limit))
+  Trace.record("game", "hang watchdog: " .. self.hung)
+  if self.socket then
+    self.socket:close()
+    self.socket = nil
+  end
+  self.connected = false
+  local info = self.process_info
+  if info and (info.pid or info.match) then
+    if info.match and not info.pid and self.wrapper_path then
+      info.pid = read_pid(self.wrapper_path .. "/_lovewright_pid")
+    end
+    kill_process(info)
+  end
+  error("lovewright: " .. self.hung, 0)
+end
+
 -- Send a request and wait for response
 function Game:_request(msg_type, params, timeout)
   if not self.connected then
-    error("Not connected to game")
+    error("Not connected to game" .. (self.hung and (": " .. self.hung) or ""))
   end
 
   timeout = timeout or 5000
@@ -567,9 +721,11 @@ function Game:_request(msg_type, params, timeout)
   local socket = require("socket")
   local start_time = socket.gettime()
   local timeout_sec = timeout / 1000
+  self:_expect()
 
   while socket.gettime() - start_time < timeout_sec do
     self:_process_messages()
+    self:_watchdog()
 
     if self.pending_requests[id] then
       local response = self.pending_requests[id]
@@ -592,9 +748,11 @@ function Game:_wait_for_event(event_type, timeout)
   local socket = require("socket")
   local start_time = socket.gettime()
   local timeout_sec = timeout / 1000
+  self:_expect()
 
   while socket.gettime() - start_time < timeout_sec do
     self:_process_messages()
+    self:_watchdog()
 
     if self._last_event and self._last_event.type == event_type then
       local event = self._last_event
@@ -620,6 +778,9 @@ function Game:_process_messages()
   elseif err == "closed" then
     self.connected = false
     return
+  end
+  if (data and #data > 0) or (partial and #partial > 0) then
+    self.quiet_since = nil   -- the game is alive
   end
 
   -- Process complete messages
@@ -762,6 +923,7 @@ function Game:headlessStatus()
 end
 
 function Game:close()
+  Game.live[self] = nil
   Trace.record("game", "close")
   Trace.game_closed(self)
 
@@ -784,6 +946,7 @@ function Game:close()
     kill_process(self.process_info)
     self.process_info = nil
   end
+  forget_game(self)
 
   -- Brief wait for cleanup
   local socket = require("socket")
@@ -798,6 +961,17 @@ function Game:close()
     rmdir(self.wrapper_path)
     self.wrapper_path = nil
   end
+end
+
+--- Close every game this process launched and has not closed (lovewright.run
+-- calls it when the run ends, also when it ends in an error)
+function Game.close_all()
+  local open = {}
+  for g in pairs(Game.live) do open[#open + 1] = g end
+  for _, g in ipairs(open) do
+    pcall(g.close, g)
+  end
+  return #open
 end
 
 return Game

@@ -132,6 +132,7 @@ local game = lovewright.launch({
   identity = "my-game-test", -- Optional: override save directory for test isolation
   exclude = { "logs" },      -- Optional: dir/file names to skip when copying the game
   isolated = false,          -- Isolated run (default: lovewright.config.isolated), see below
+  hang_timeout = 300,        -- Hang watchdog, seconds (default: lovewright.config.hang_timeout), see below
 })
 ```
 
@@ -330,6 +331,21 @@ lovewright.config.isolated = true   -- or LOVEWRIGHT_ISOLATED=1
   ready event (a game from another run that answers on the port is
   dropped without being shut down)
 - the runtime's debug log (`LOVEWRIGHT_DEBUG=1`) gets the run id in its name
+- orphans: the launcher claims its game with the token, and a claimed game
+  whose runner's connection drops without a shutdown (the runner died or
+  was stopped) quits by itself. One stuck inside a long frame cannot, so
+  each game is recorded in `<TEMP>/lovewright/runs/<run id>.games` (pid,
+  wrapper, the runner's lock file), and the next isolated launch with that
+  run id kills a recorded game whose runner is gone, if it is still a
+  running `love` process whose wrapper names that pid
+
+**Hang watchdog.** Once a game has sent nothing for `hang_timeout` seconds
+(default 300; `lovewright.config.hang_timeout`, `LOVEWRIGHT_HANG_TIMEOUT`;
+0 turns it off) while requests wait on it - timed-out requests in a row
+add up - the launcher kills that game (its own pid only) and fails the
+request with "hang watchdog"; later requests to it fail at once instead of
+each waiting out its timeout. `lovewright.run` also closes any game still
+open when the run ends, an error included.
 
 The **run id** is the working directory's folder name plus a hash of its
 path (`LOVEWRIGHT_RUN_ID` overrides): stable for a checkout, different for
@@ -354,8 +370,9 @@ none is left and blocks new shared ones while it waits and runs (queued
 exclusive runs go first-come first-served). Waiting runs print who they
 wait for once a minute. A runner that dies holding the lock does not block
 the others: on Windows each holder keeps its lock file open and a file
-that can be deleted belonged to a dead process; elsewhere the file holds
-the runner's pid. An isolated shared run also refuses to start next to a
+that can be deleted belonged to a dead process (the files are opened
+non-inheritable, so a game the runner launched cannot keep a dead runner's
+file open); elsewhere the file holds the runner's pid. An isolated shared run also refuses to start next to a
 live run with the same run id (they would share output files).
 `LOVEWRIGHT_LOCK=off` skips the lock. To hold it across several
 `lovewright.run` calls, take it yourself and set `config.lock = false`:
