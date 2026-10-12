@@ -17,6 +17,15 @@ local lovewright = {
     headless_mode = os.getenv("LOVEWRIGHT_HEADLESS_MODE") or "hidden",
     trace = "off",              -- "off" | "on" | "retain-on-failure"
     trace_dir = "lovewright-traces",  -- Where trace HTML files are written
+    -- Isolated run: several runs on one machine at once without sharing a
+    -- save dir, wrapper copy, port or game process (lovewright/isolation.lua).
+    -- LOVEWRIGHT_ISOLATED=1 turns it on
+    isolated = os.getenv("LOVEWRIGHT_ISOLATED") == "1",
+    -- Cross-process run lock taken by lovewright.run (lovewright/lock.lua):
+    -- nil | "shared" | "exclusive". nil = "shared" in an isolated run, no
+    -- lock otherwise. LOVEWRIGHT_LOCK=off disables it
+    lock = nil,
+    lock_dir = nil,             -- default <TEMP>/lovewright/locks (LOVEWRIGHT_LOCK_DIR)
   },
 }
 
@@ -27,6 +36,8 @@ local ExpectModule = require("lovewright.expect")
 local Screenshot = require("lovewright.screenshot")
 local Trace = require("lovewright.trace")
 local Step = require("lovewright.step")
+local Lock = require("lovewright.lock")
+local Isolation = require("lovewright.isolation")
 
 -- Traces read the shared config table (mode and output dir)
 Trace.config = lovewright.config
@@ -43,9 +54,13 @@ Trace.config = lovewright.config
 -- @param options.identity string Override save-directory identity for test isolation
 -- @param options.exclude table Dir/file names to skip when copying the game (".git" always skipped)
 -- @param options.args table Extra command-line arguments for the game (read from LÖVE's `arg`)
+-- @param options.isolated boolean Isolated run (default: lovewright.config.isolated)
 -- @return Game Game controller instance
 function lovewright.launch(options)
   options = options or {}
+  if options.isolated == nil then
+    options.isolated = lovewright.config.isolated
+  end
   -- Apply global config defaults
   if options.headless == nil then
     options.headless = lovewright.config.headless
@@ -128,9 +143,40 @@ lovewright.screenshot = Screenshot
 -- @param options.path string Directory to search for tests
 -- @param options.pattern string Lua pattern for test files
 -- @param options.files table Explicit list of test files
+-- @param options.lock string nil | "shared" | "exclusive" (default: lovewright.config.lock)
+-- @param options.lock_label string Who holds the lock, shown to waiting runs
 -- @return table Test results
 function lovewright.run(options)
-  return Runner.run(options)
+  options = options or {}
+  local config = lovewright.config
+  local mode = options.lock or config.lock
+  if mode == nil and config.isolated then
+    mode = "shared"
+  end
+  if os.getenv("LOVEWRIGHT_LOCK") == "off" then
+    mode = nil
+  end
+
+  if config.isolated then
+    print("Isolated run " .. Isolation.run_id() .. " (own save dir, wrapper, port and pids)")
+  end
+  local held
+  if mode then
+    held = Lock.acquire(mode, {
+      dir = config.lock_dir,
+      label = options.lock_label or ((config.isolated and Isolation.run_id() or Isolation.cwd()) .. " (" .. mode .. ")"),
+      -- one isolated run per checkout: they would share its output files
+      key = (mode == "shared" and config.isolated) and Isolation.run_id() or nil,
+    })
+  end
+  local ok, results = pcall(Runner.run, options)
+  if held then
+    held:release()
+  end
+  if not ok then
+    error(results, 0)
+  end
+  return results
 end
 
 --- Reset test state (useful for meta-testing)

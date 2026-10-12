@@ -57,13 +57,15 @@ local function format_args(game_args)
   return " " .. table.concat(out, " ")
 end
 
-local function launch_process(cmd, path, port, headless, game_args)
+local function launch_process(cmd, path, port, headless, game_args, isolated)
   local extra = format_args(game_args)
   if is_windows then
     local win_path = path:gsub("/", "\\")
 
-    -- Get list of love.exe PIDs before launch
-    local before_pids = get_love_pids()
+    -- Get list of love.exe PIDs before launch. Not in an isolated run:
+    -- another run may be launching its own love.exe at the same moment, so
+    -- the diff could name ITS game; the wrapper reports our pid instead
+    local before_pids = isolated and {} or get_love_pids()
 
     -- Headless: the runtime hides the window (runtime/headless.lua); these
     -- SDL hints (SDL3 / SDL2 spelling) stop it taking keyboard focus in the
@@ -73,6 +75,11 @@ local function launch_process(cmd, path, port, headless, game_args)
       env = 'set "SDL_WINDOW_ACTIVATE_WHEN_SHOWN=0"&& set "SDL_WINDOW_NO_ACTIVATION_WHEN_SHOWN=1"&& '
     end
     os.execute(env .. 'start "" "' .. cmd .. '" "' .. win_path .. '"' .. extra)
+
+    if isolated then
+      -- pid comes from the wrapper's _lovewright_pid file (read_pid)
+      return { port = port, match = path }
+    end
 
     -- Brief wait for process to start
     local socket = require("socket")
@@ -93,6 +100,9 @@ local function launch_process(cmd, path, port, headless, game_args)
     local env = headless
       and 'SDL_WINDOW_ACTIVATE_WHEN_SHOWN=0 SDL_WINDOW_NO_ACTIVATION_WHEN_SHOWN=1 ' or ''
     os.execute(env .. cmd .. ' "' .. path .. '"' .. extra .. ' 2>&1 &')
+    if isolated then
+      return { port = port, match = path }
+    end
     return nil
   end
 end
@@ -101,11 +111,22 @@ end
 local function kill_process(process_info)
   if not process_info then return end
   if is_windows then
-    if process_info.pid then
+    local pids = { process_info.pid }
+    if not process_info.pid and process_info.match then
+      -- isolated run whose game never reported its pid: find it by the
+      -- wrapper path on its command line (never by image name)
+      pids = require("lovewright.isolation").find_pids(process_info.match:match("[^/\\]+$"))
+    end
+    for _, pid in ipairs(pids) do
       -- Kill by PID (most reliable)
-      local cmd = 'taskkill /PID ' .. process_info.pid .. ' /T /F >nul 2>&1'
+      local cmd = 'taskkill /PID ' .. pid .. ' /T /F >nul 2>&1'
       os.execute(cmd)
     end
+  elseif process_info.pid then
+    os.execute('kill -9 ' .. process_info.pid .. ' 2>/dev/null')
+  elseif process_info.match then
+    -- isolated: only this run's game (its wrapper path is on the command line)
+    os.execute('pkill -f "' .. process_info.match .. '" 2>/dev/null')
   else
     -- Unix: could use pkill or similar
     os.execute('pkill -f "love.*lovewright" 2>/dev/null')
@@ -273,6 +294,31 @@ end
   return conf
 end
 
+-- Isolated runs: the wrapper writes the game's own pid next to itself
+-- (_lovewright_pid) before anything else runs, so the launcher can close
+-- exactly this game even if it never connects. (__asm__ renames keep the
+-- declarations from clashing with any the game makes itself.)
+local PID_SNIPPET = [[
+do
+  local okF, ffi = pcall(require, "ffi")
+  if okF then
+    if jit and jit.os == "Windows" then
+      pcall(ffi.cdef, 'unsigned long lovewright_getpid(void) __asm__("GetCurrentProcessId");')
+    else
+      pcall(ffi.cdef, 'int lovewright_getpid(void) __asm__("getpid");')
+    end
+    local okP, pid = pcall(function() return tonumber(ffi.C.lovewright_getpid()) end)
+    if okP and pid then
+      local f = io.open(love.filesystem.getSource() .. "/_lovewright_pid", "w")
+      if f then
+        f:write(tostring(pid))
+        f:close()
+      end
+    end
+  end
+end
+]]
+
 -- Create wrapper main.lua content
 local function create_wrapper(options, port)
   -- Create a wrapper that loads the runtime (runtime files will be copied alongside)
@@ -283,6 +329,11 @@ local function create_wrapper(options, port)
   -- hidden if the game re-creates it) - see lovewright/runtime/headless.lua
   require("lovewright.runtime.headless").install(%q)
 ]], options.headless_mode or "hidden") or ""
+
+  local runtime_extra = ""
+  if options.isolated then
+    runtime_extra = string.format(", token = %q, debug_tag = %q", options.token, options.run_id or "")
+  end
 
   local wrapper = string.format([[
 -- Lovewright runtime wrapper
@@ -305,7 +356,7 @@ function love.load(arg)
     end
 
     -- Now init runtime AFTER game defines its callbacks (so we can wrap them)
-    lovewright.runtime.init({ headless = %s, port = %d })
+    lovewright.runtime.init({ headless = %s, port = %d%s })
 
     -- Call game's love.load if it exists
     if love.load and love.load ~= _G._lovewright_load then
@@ -319,10 +370,20 @@ _G._lovewright_load = love.load
 ]],
     headless_init,
     options.headless and "true" or "false",
-    port
+    port,
+    runtime_extra
   )
 
+  if options.isolated then
+    wrapper = "-- Lovewright isolated run " .. tostring(options.run_id) .. "\n" .. PID_SNIPPET .. wrapper
+  end
   return wrapper
+end
+
+-- The pid in an isolated run's _lovewright_pid file (nil until the game started)
+local function read_pid(pid_file)
+  local s = read_file(is_windows and pid_file:gsub("/", "\\") or pid_file)
+  return s and s:match("^%s*(%d+)") or nil
 end
 
 -- Find or create temp directory
@@ -346,6 +407,18 @@ function Game.launch(options)
     error("Game path is required")
   end
 
+  -- Isolated run (lovewright.isolation): own save dir, wrapper copy, port,
+  -- launch token and pid. Works on a copy so the caller's table is untouched
+  if options.isolated then
+    local Isolation = require("lovewright.isolation")
+    local copy = {}
+    for k, v in pairs(options) do copy[k] = v end
+    options = copy
+    options.run_id = Isolation.run_id()
+    options.token = Isolation.token()
+    options.identity = (options.identity or "lovewright") .. "-" .. options.run_id
+  end
+
   local self = setmetatable({}, Game)
   self.options = options
   self.process = nil
@@ -356,14 +429,22 @@ function Game.launch(options)
   self.pending_requests = {}
   self.frame_count = 0
 
-  -- Get unique port for this instance
-  self.port = protocol.get_port()
+  -- Get unique port for this instance (isolated: a free one at random,
+  -- not BASE_PORT + the time, which another runner may be counting up from)
+  if options.isolated then
+    self.port = require("lovewright.isolation").free_port()
+  else
+    self.port = protocol.get_port()
+  end
 
   -- Create wrapper
   local wrapper = create_wrapper(options, self.port)
   local conf = create_conf(options)
   local temp_dir = get_temp_dir()
   local wrapper_path = temp_dir .. "/wrapper_" .. os.time()
+  if options.isolated then
+    wrapper_path = temp_dir .. "/wrapper_" .. options.run_id .. "_" .. options.token
+  end
   mkdir(wrapper_path)
 
   -- Copy game files into the wrapper root (keeps require/asset paths intact)
@@ -397,7 +478,8 @@ function Game.launch(options)
   self.wrapper_path = wrapper_path
 
   -- Launch process
-  self.process_info = launch_process(options.love_path, wrapper_path, self.port, options.headless, options.args)
+  self.process_info = launch_process(options.love_path, wrapper_path, self.port, options.headless, options.args,
+    options.isolated)
 
   -- Connect to runtime
   local socket = require("socket")
@@ -431,6 +513,18 @@ function Game.launch(options)
     self:close()
     error("Game runtime did not send ready event within " .. options.timeout .. "ms")
   end
+  if options.isolated then
+    if type(ready) ~= "table" or ready.token ~= options.token then
+      -- another run's game answered on our port: drop the connection
+      -- WITHOUT the shutdown request (that game is not ours to stop)
+      self.socket:close()
+      self.socket = nil
+      self.connected = false
+      self:close()
+      error("Connected to a game from another run on port " .. tostring(self.port) .. " (launch token mismatch)")
+    end
+    self.process_info.pid = self.process_info.pid or read_pid(wrapper_path .. "/_lovewright_pid")
+  end
   -- How the window ended up when headless: "hidden" | "offscreen" |
   -- "minimized" | "none" (see Game:headlessStatus)
   self.headless_status = type(ready) == "table" and ready.headless or nil
@@ -440,6 +534,8 @@ function Game.launch(options)
     width = options.width,
     height = options.height,
     port = self.port,
+    run = options.run_id,
+    pid = self.process_info and self.process_info.pid or nil,
   })
 
   return self
@@ -673,6 +769,9 @@ function Game:close()
 
   -- Force kill the process
   if self.process_info then
+    if self.process_info.match and not self.process_info.pid and self.wrapper_path then
+      self.process_info.pid = read_pid(self.wrapper_path .. "/_lovewright_pid")
+    end
     kill_process(self.process_info)
     self.process_info = nil
   end

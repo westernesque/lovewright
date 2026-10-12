@@ -5,7 +5,8 @@ local runtime = {}
 
 -- Debug logging (disabled by default, enable for troubleshooting)
 local DEBUG = os.getenv("LOVEWRIGHT_DEBUG") == "1"
-local debug_log_path = (os.getenv("TEMP") or os.getenv("TMPDIR") or "/tmp") .. "/lovewright_debug.log"
+local debug_log_dir = os.getenv("TEMP") or os.getenv("TMPDIR") or "/tmp"
+local debug_log_path = debug_log_dir .. "/lovewright_debug.log"
 
 local function debug_log(msg)
   if not DEBUG then return end
@@ -184,6 +185,8 @@ local function accept_client()
       version = protocol.VERSION,
       frame = state.frame_count,
       headless = headless_status,
+      -- isolated runs: the launcher checks it reached ITS game
+      token = state.token,
     })
     local ok, err = send_all(client, protocol.frame(msg))
     if ok then
@@ -599,6 +602,11 @@ function runtime.init(options)
   options = options or {}
   state.headless = options.headless or false
   state.port = options.port  -- Use specific port if provided
+  state.token = options.token  -- isolated runs: echoed in the ready event
+  if options.debug_tag and options.debug_tag ~= "" then
+    -- isolated runs: a debug log of this run's own
+    debug_log_path = debug_log_dir .. "/lovewright_debug_" .. options.debug_tag .. ".log"
+  end
   if state.headless then
     -- installed by the wrapper's love.load before the game ran
     local okH, hl = pcall(require, "lovewright.runtime.headless")

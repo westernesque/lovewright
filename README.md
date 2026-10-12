@@ -131,6 +131,7 @@ local game = lovewright.launch({
   timeout = 5000,            -- Connection timeout in ms
   identity = "my-game-test", -- Optional: override save directory for test isolation
   exclude = { "logs" },      -- Optional: dir/file names to skip when copying the game
+  isolated = false,          -- Isolated run (default: lovewright.config.isolated), see below
 })
 ```
 
@@ -306,6 +307,64 @@ lovewright.config.trace_dir = "lovewright-traces"  -- output directory
 
 Events recorded inside a [step](#steps) nest under it in the timeline, and
 the trace header names the step a failing test failed in.
+
+### Parallel runs and the run lock
+
+By default a run assumes it has the machine to itself: games get ports
+counted up from a time-based base, the wrapper copy is named after the
+second it was made, the launcher finds the game's pid by diffing the
+`love` process list, and `identity` names one shared save directory. Two
+runs at once (two CI agents, two git worktrees) can then talk to, kill or
+share state with each other's games. An **isolated** run avoids all of it:
+
+```lua
+lovewright.config.isolated = true   -- or LOVEWRIGHT_ISOLATED=1
+```
+
+- save directory: `identity` becomes `"<identity>-<run id>"`
+- wrapper copy: `<TEMP>/lovewright/wrapper_<run id>_<token>`
+- port: a free one drawn at random below the OS's ephemeral range
+- the game: the wrapper writes the game's own pid next to itself before
+  anything else runs (the launcher closes exactly that process, never one
+  found by image name), and the runtime echoes a per-launch token in its
+  ready event (a game from another run that answers on the port is
+  dropped without being shut down)
+- the runtime's debug log (`LOVEWRIGHT_DEBUG=1`) gets the run id in its name
+
+The **run id** is the working directory's folder name plus a hash of its
+path (`LOVEWRIGHT_RUN_ID` overrides): stable for a checkout, different for
+checkouts side by side. Output paths you configure yourself (`trace_dir`,
+`report_output`, screenshots) are relative to the working directory, so
+give each concurrent run its own. `require("lovewright.isolation")` also
+offers `free_port()` and `free_udp_pair()` for servers a suite starts
+itself.
+
+**Run lock.** `lovewright.run` can hold a cross-process lock while it runs
+(`lovewright/lock.lua`, files under `<TEMP>/lovewright/locks`,
+`LOVEWRIGHT_LOCK_DIR` overrides):
+
+```lua
+lovewright.config.lock = "shared"     -- default for isolated runs; nil = no lock otherwise
+lovewright.config.lock = "exclusive"  -- timing-sensitive runs: benchmarks, slowed-down passes
+lovewright.config.lock = false        -- never (e.g. when the caller holds it itself)
+```
+
+Any number of shared holders run together; an exclusive run waits until
+none is left and blocks new shared ones while it waits and runs (queued
+exclusive runs go first-come first-served). Waiting runs print who they
+wait for once a minute. A runner that dies holding the lock does not block
+the others: on Windows each holder keeps its lock file open and a file
+that can be deleted belonged to a dead process; elsewhere the file holds
+the runner's pid. An isolated shared run also refuses to start next to a
+live run with the same run id (they would share output files).
+`LOVEWRIGHT_LOCK=off` skips the lock. To hold it across several
+`lovewright.run` calls, take it yourself and set `config.lock = false`:
+
+```lua
+local held = require("lovewright.lock").acquire("exclusive", { label = "benchmarks" })
+-- ... lovewright.run(...) as often as needed ...
+held:release()
+```
 
 ### Test Structure
 
