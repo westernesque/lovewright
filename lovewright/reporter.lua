@@ -307,6 +307,10 @@ function Reporter.generate_html(results, options)
         error_block = string.format('<div class="in-step">In step: <b>%s</b></div>', escape_html(t.step))
           .. error_block
       end
+      if t.after_all_error then
+        error_block = error_block .. string.format('<div class="error">afterAll failed too: %s</div>',
+          escape_html(t.after_all_error))
+      end
       -- Step outline: open for failed tests, collapsed otherwise
       if t.steps and #t.steps > 0 then
         error_block = error_block .. string.format(
@@ -348,7 +352,8 @@ function Reporter.generate_html(results, options)
         escape_html(failure.test),
         phase_badge,
         escape_html(failure.suite),
-        escape_html(failure.error),
+        escape_html(failure.error)
+          .. (failure.after_all_error and ("<br>afterAll failed too: " .. escape_html(failure.after_all_error)) or ""),
         failure.trace and ('<div class="trace-link">' .. trace_link(failure.trace) .. "</div>") or ""
       )
     end

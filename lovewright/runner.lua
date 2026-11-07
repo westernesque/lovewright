@@ -325,6 +325,27 @@ local function run_test(test, suite_name, hooks)
   end
 end
 
+-- End a suite: its afterAll hooks, then the games it launched and left open.
+-- The setup may not have finished, so a hook can trip over a handle that was
+-- never set: each hook runs on its own, and a launch helper's game that never
+-- reached the suite's variable still gets closed here, by the registry.
+-- Returns the hooks' errors, joined (nil if none).
+local function end_suite(suite, full_name, games_before)
+  local errors = {}
+  for _, hook in ipairs(suite.after_all) do
+    local ok, err = pcall(hook)
+    if not ok then
+      errors[#errors + 1] = tostring(err)
+      io.write("  afterAll failed: " .. tostring(err) .. "\n")
+    end
+  end
+  local left = require("lovewright.game").close_since(games_before)
+  if left > 0 then
+    print("[lovewright] closed " .. left .. " game(s) left open by suite: " .. full_name)
+  end
+  return #errors > 0 and table.concat(errors, "\n") or nil
+end
+
 -- Run a suite
 local function run_suite(suite, parent_name, parent_hooks)
   local full_name = parent_name and (parent_name .. " > " .. suite.name) or suite.name
@@ -377,6 +398,7 @@ local function run_suite(suite, parent_name, parent_hooks)
   local Step = require("lovewright.step")
   Trace.begin(full_name, "(suite setup)")
   Step.reset()
+  local games_before = require("lovewright.game").open_games()
   local ok, err = pcall(function()
     run_hooks(suite.before_all)
   end)
@@ -414,6 +436,11 @@ local function run_suite(suite, parent_name, parent_hooks)
       record.trace = trace_path
       io.write("    Trace: " .. trace_path .. "\n")
     end
+    -- A failed setup costs this suite only: stop what it started. The
+    -- failure above stays the suite's error; afterAll's is noted beside it
+    local after_all_error = end_suite(suite, full_name, games_before)
+    failure.after_all_error = after_all_error
+    record.after_all_error = after_all_error
     return
   end
   Trace.finish("passed")
@@ -428,10 +455,7 @@ local function run_suite(suite, parent_name, parent_hooks)
     run_suite(nested, full_name, hooks)
   end
 
-  -- Run afterAll
-  pcall(function()
-    run_hooks(suite.after_all)
-  end)
+  end_suite(suite, full_name, games_before)
 end
 
 -- Check if running on Windows
@@ -558,6 +582,9 @@ function Runner.run(options)
         print("   In step: " .. failure.step)
       end
       print("   " .. failure.error:gsub("\n", "\n   "))
+      if failure.after_all_error then
+        print("   afterAll failed too: " .. failure.after_all_error:gsub("\n", "\n   "))
+      end
     end
   end
 

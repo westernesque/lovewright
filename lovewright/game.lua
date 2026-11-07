@@ -596,6 +596,8 @@ function Game.launch(options)
   -- Launch process
   self.process_info = launch_process(options.love_path, wrapper_path, self.port, options.headless, options.args,
     options.isolated)
+  -- Live from here on: whatever goes wrong while it boots, it gets closed
+  Game.live[self] = true
 
   -- Connect to runtime
   local socket = require("socket")
@@ -654,7 +656,6 @@ function Game.launch(options)
     pcall(self._request, self, protocol.MessageType.PING, { token = options.token }, options.timeout)
     record_game(self)
   end
-  Game.live[self] = true
   -- How the window ended up when headless: "hidden" | "offscreen" |
   -- "minimized" | "none" (see Game:headlessStatus)
   self.headless_status = type(ready) == "table" and ready.headless or nil
@@ -963,15 +964,30 @@ function Game:close()
   end
 end
 
---- Close every game this process launched and has not closed (lovewright.run
--- calls it when the run ends, also when it ends in an error)
-function Game.close_all()
+--- The games open right now, as a set (for Game.close_since)
+function Game.open_games()
+  local set = {}
+  for g in pairs(Game.live) do set[g] = true end
+  return set
+end
+
+--- Close every game launched since `before` (a Game.open_games set) and not
+-- closed yet; returns how many
+function Game.close_since(before)
   local open = {}
-  for g in pairs(Game.live) do open[#open + 1] = g end
+  for g in pairs(Game.live) do
+    if not before[g] then open[#open + 1] = g end
+  end
   for _, g in ipairs(open) do
     pcall(g.close, g)
   end
   return #open
+end
+
+--- Close every game this process launched and has not closed (lovewright.run
+-- calls it when the run ends, also when it ends in an error)
+function Game.close_all()
+  return Game.close_since({})
 end
 
 return Game

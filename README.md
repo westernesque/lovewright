@@ -274,6 +274,21 @@ through a step unchanged (same value, same message), so a `pcall` around a
 step sees exactly what `fn` raised. Steps work in hooks too (`beforeEach`,
 `beforeAll`, ...): a failing hook reports its step the same way.
 
+### When a setup fails
+
+A failed `beforeAll` costs that suite only. Its tests are skipped, but its
+`afterAll` hooks still run, so write them for a setup that may not have finished
+(`if game then game:close() end`). Each hook runs on its own: an error in one is
+logged and the others still run. After a failed setup the report keeps the
+`beforeAll` error as the suite's failure, with the `afterAll` error beside it;
+after a good setup an `afterAll` error is logged and fails nothing.
+
+When a suite ends, the runner also closes any game launched during it that is
+still open, handle or no handle (a launch helper that fails after launching
+never returned one). A game launched in one suite therefore can't be used by the
+next one: share it through a parent `describe`, whose game stays open until the
+parent ends.
+
 ### Screenshots
 
 ```lua
